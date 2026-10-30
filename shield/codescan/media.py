@@ -8,7 +8,7 @@ from PIL import Image
 
 from shield import face, pdq
 from shield.redact.image import ocr_words
-from shield.detect import detect
+from shield.detect import UNVERIFIED, detect, labelled_ids
 
 from . import Finding, fingerprint, mask, record_error
 
@@ -58,7 +58,7 @@ def _ocr_findings(path: Path, rel: str, values: list | None = None) -> list[Find
         text += w + " "
         pos += len(w) + 1
     out = []
-    for ent in detect(text):
+    for ent in detect(text) + labelled_ids(text):
         if ent.type not in OCR_TYPES:
             continue
         boxes = [b for a, z, b in spans if a < ent.end and z > ent.start]
@@ -68,13 +68,14 @@ def _ocr_findings(path: Path, rel: str, values: list | None = None) -> list[Find
         x1, y1 = max(b[0] + b[2] for b in boxes), max(b[1] + b[3] for b in boxes)
         out.append(Finding(
             fingerprint("OCR_PII", rel, f"{ent.type}@{x0},{y0}", ent.value), "media", "OCR_PII",
-            "critical" if ent.type in {"IN_AADHAAR", "CREDIT_CARD"} else "high", rel, 0, 0, 0, 0,
-            f"{ent.type} visible in image (OCR) at x={x0} y={y0} w={x1 - x0} h={y1 - y0}", mask(ent.value, ent.type),
+            "medium" if ent.score == UNVERIFIED else "critical" if ent.type in {"IN_AADHAAR", "CREDIT_CARD"} else "high", rel, 0, 0, 0, 0,
+            f"{ent.type} visible in image (OCR) at x={x0} y={y0} w={x1 - x0} h={y1 - y0}" + (", labelled as this ID, failed its format or checksum check" if ent.score == UNVERIFIED else ""), mask(ent.value, ent.type),
             ["redact_image", "hash_pdq", "ignore"], confidence=round(min(ent.score, 0.8), 2), bbox=[x0, y0, x1 - x0, y1 - y0],
         ))
 
     # Also detect hardcoded secrets & API keys on OCR'd text
     norm_text = text.replace("—", "-").replace("–", "-").replace("“", '"').replace("”", '"')
+    norm_text = re.sub(r"[^\x00-\x7F]", "X", norm_text)  # OCR misreads a glyph as £ or é inside keys; 1:1 keeps offsets valid
     seen_boxes: set[tuple[int, int]] = set()
 
     for rule_name, rx in EXTRA_RULES.items():
@@ -104,13 +105,13 @@ def _ocr_findings(path: Path, rel: str, values: list | None = None) -> list[Find
     token_splits = [
         ("OpenAI Token", re.compile(r"sk-proj-[\w\s-]{35,}")),
         ("Groq Token", re.compile(r"gsk_[A-Za-z0-9\s]{35,}")),
+        ("AWS Access Key", re.compile(r"AKIA(?:[A-Z0-9] ?){16}(?![A-Z0-9])")),
     ]
     for rule_name, rx in token_splits:
         for m in rx.finditer(norm_text):
             raw = m.group(0)
             collapsed = raw.replace(" ", "")
-            if (rule_name == "OpenAI Token" and len(collapsed) >= 48) or \
-               (rule_name == "Groq Token" and len(collapsed) >= 44):
+            if len(collapsed) >= {"OpenAI Token": 48, "Groq Token": 44, "AWS Access Key": 20}[rule_name]:
                 boxes = [b for a, z, b in spans if a < m.end() and z > m.start()]
                 if not boxes:
                     continue

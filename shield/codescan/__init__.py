@@ -47,6 +47,7 @@ class Finding:
     evidence: str = ""  # masked context, never the raw value
     recommendation: str = ""
     bbox: list[int] | None = None  # image findings: [x, y, w, h] in pixels
+    rationale: str = ""  # AI pass only: the model's reason, value masked
 
     def to_dict(self):
         return asdict(self)
@@ -96,6 +97,7 @@ def fingerprint(rule: str, relpath: str, line_text: str, value: str) -> str:
 
 DOC_SUFFIXES = {".pdf", ".docx", ".xlsx"}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff"}
+NOTE_SUFFIXES = {".txt", ".md", ".csv", ".tsv", ".log"}  # plain text the AI pass may read; source code is never sent
 
 
 def walk(
@@ -179,8 +181,9 @@ RECOMMEND = {
     "config": "Stop tracking the file and add it to .gitignore; rotate anything it contained.",
     "media": "Remove the sensitive region with an opaque fill and strip metadata; a PDQ fingerprint does not sanitize an image.",
     "document": "Sanitize the document with Shield·Scout (web) so text, metadata and hidden layers are removed, then replace the file.",
+    "cognitive": "AI judgement, not a verified match: check it, then remove the value or ignore the finding.",
 }
-DEFAULT_CONFIDENCE = {"secrets": 0.9, "pii": 0.85, "sast": 0.7, "config": 0.95, "media": 0.6, "document": 0.85}
+DEFAULT_CONFIDENCE = {"secrets": 0.9, "pii": 0.85, "sast": 0.7, "config": 0.95, "media": 0.6, "document": 0.85, "cognitive": 0.6}
 ALL_ENGINES = ["secrets", "pii", "sast", "config", "media", "document"]
 
 
@@ -194,6 +197,7 @@ def scan(
     ocr: bool = True,
     max_file_mb: float = 2,
     exclude: tuple[str, ...] = (),
+    cognitive: bool = False,
 ) -> dict:
     """Run independent engines in parallel (bounded by `workers`); each engine gets the remaining time budget."""
     started = time.monotonic()
@@ -236,6 +240,10 @@ def scan(
         from .docs import scan_documents
 
         jobs["document"] = lambda: scan_documents(doc_files, root, ocr=ocr)
+    if cognitive or (root / ".shield/cache/cognitive.json").exists():  # cached findings need no network and no consent
+        from .cognitive import scan_cognitive
+
+        jobs["cognitive"] = lambda: scan_cognitive(image_files + doc_files + [p for p in text_files if p.suffix.lower() in NOTE_SUFFIXES], root, cognitive, ocr, stats)
     if ocr and (image_files or doc_files):
         from shutil import which
 

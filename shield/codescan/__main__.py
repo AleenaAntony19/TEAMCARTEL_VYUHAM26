@@ -25,6 +25,7 @@ def main(argv=None):
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--timeout", type=float, default=300, help="overall seconds; unfinished engines report 'timeout'")
     p.add_argument("--no-ocr", action="store_true")
+    p.add_argument("--cognitive", action="store_true", help="send OCR and document text to the configured AI provider; known values are blanked first")
     p.add_argument("--max-file-mb", type=float, default=2)
     p.add_argument("--exclude", action="append", default=[], help="glob on repo-relative paths; repeatable")
 
@@ -47,6 +48,7 @@ def main(argv=None):
         result = scan(
             Path(args.root), [Path(x) for x in args.files] if args.files else None, engines, args.history,
             workers=args.workers, timeout=args.timeout, ocr=not args.no_ocr, max_file_mb=args.max_file_mb, exclude=tuple(args.exclude),
+            cognitive=args.cognitive,
         )
         if args.format == "json":
             text = json.dumps(result, indent=2)

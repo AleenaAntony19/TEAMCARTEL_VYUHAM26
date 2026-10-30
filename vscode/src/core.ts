@@ -6,12 +6,13 @@ export interface Finding {
   id: string; engine: string; rule: string; severity: Severity; file: string;
   line: number; col: number; end_line: number; end_col: number;
   message: string; masked: string; fixes: string[]; in_history: boolean;
-  confidence: number; evidence: string; recommendation: string; bbox: number[] | null;
+  confidence: number; evidence: string; recommendation: string; bbox: number[] | null; rationale?: string;
 }
 
 export interface ScanResult {
   version: number; root: string; findings: Finding[];
-  stats: { files: number; ms: number; engines: Record<string, string>; errors: { file: string; engine: string; error: string }[]; ocr: string; timed_out?: boolean };
+  stats: { files: number; ms: number; engines: Record<string, string>; errors: { file: string; engine: string; error: string }[]; ocr: string; timed_out?: boolean;
+    cognitive?: { sent: number; cached: number; skipped: number; truncated: number; model: string; error?: string } };
 }
 
 // Same model as shield/codescan/fix.py: replace [line:col, end_line:end_col); lines 1-based, cols 0-based.
@@ -77,12 +78,13 @@ export const FIX_TITLES: Record<string, string> = {
 };
 
 /** Engines whose findings can be re-located by scanning only their file. */
-export const FILE_SCOPED = new Set(["secrets", "pii", "media", "document"]);
+export const FILE_SCOPED = new Set(["secrets", "pii", "media", "document", "cognitive"]);
 
-export function scanArgs(root: string, opts: { engines: string[]; ocr: boolean; maxFileMB: number; exclude: string[]; concurrency: number; timeout: number; files?: string[] }): string[] {
+export function scanArgs(root: string, opts: { engines: string[]; ocr: boolean; maxFileMB: number; exclude: string[]; concurrency: number; timeout: number; files?: string[]; cognitive?: boolean }): string[] {
   const args = ["-m", "shield.codescan", "scan", root, "--format", "json", "--workers", String(opts.concurrency),
     "--timeout", String(opts.timeout), "--max-file-mb", String(opts.maxFileMB), "--engines", opts.engines.join(",")];
   if (!opts.ocr) args.push("--no-ocr");
+  if (opts.cognitive) args.push("--cognitive");
   for (const e of opts.exclude) args.push("--exclude", e);
   if (opts.files?.length) args.push("--files", ...opts.files);
   return args;
@@ -121,4 +123,4 @@ export function explainStartFailure(message: string, platform: string): string {
   return message;
 }
 
-export const RETIRED_MODELS = new Set(["llama-3.3-70b-versatile", "claude-3-7-sonnet", "claude-3-5-haiku"]);
+export const RETIRED_MODELS = new Set(["claude-3-7-sonnet", "claude-3-5-haiku"]);

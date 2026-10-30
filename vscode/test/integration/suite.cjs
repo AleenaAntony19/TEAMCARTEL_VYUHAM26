@@ -39,6 +39,13 @@ exports.run = async () => {
   const imgDiags = vscode.languages.getDiagnostics(img);
   assert.ok(imgDiags.some((d) => d.code === "OCR_PII" && /x=\d+ y=\d+/.test(d.message)), "OCR finding with bounding box on image");
 
+  assert.ok(imgDiags.some((d) => d.code === "AI_SENSITIVE"), "cached AI finding shown after a plain scan");
+  assert.ok(titles.includes("Shield: Why flagged"), `why flagged offered: ${titles}`);
+  const commands = await vscode.commands.getCommands(true);
+  for (const c of ["shieldCode.deepScan", "shieldCode.whyFlagged", "shieldCode.pickFix"]) assert.ok(commands.includes(c), `${c} registered`);
+  await vscode.commands.executeCommand("shieldCode.whyFlagged", { finding: { f: { rule: "AI_SENSITIVE", file: "docs/kyc.png", line: 0, engine: "cognitive", confidence: 0.6, message: "m", masked: "•••", rationale: "r", recommendation: "n" } } });
+  assert.equal(api.lastError(), "", "no extension error");
+
   const users = vscode.Uri.file(path.join(ws, "tests", "users.json"));
   assert.ok(vscode.languages.getDiagnostics(users).some((d) => d.code === "IN_AADHAAR"), "Aadhaar in fixture");
   console.log(`SHIELD-IT OK: ${diags.length} config.py diags, ${imgDiags.length} image diags, actions: ${titles.join(" | ")}`);

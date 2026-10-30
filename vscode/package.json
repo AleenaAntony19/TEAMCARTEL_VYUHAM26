@@ -2,7 +2,7 @@
   "name": "shield-code",
   "displayName": "Shield·Code",
   "description": "Scan a workspace for secrets, Indian PII, unsafe code, risky config and sensitive images/documents; review and apply safe fixes with a preview.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "shield-scout",
   "license": "UNLICENSED",
   "engines": {
@@ -46,6 +46,19 @@
       {
         "command": "shieldCode.revealFinding",
         "title": "Shield: Reveal Finding"
+      },
+      {
+        "command": "shieldCode.deepScan",
+        "title": "Shield: AI Deep Scan (asks before sending text)",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "shieldCode.whyFlagged",
+        "title": "Why flagged"
+      },
+      {
+        "command": "shieldCode.pickFix",
+        "title": "Fix…"
       }
     ],
     "viewsContainers": {
@@ -76,9 +89,32 @@
           "command": "shieldCode.scanWorkspace",
           "when": "view == shieldCode.findings",
           "group": "navigation"
+        },
+        {
+          "command": "shieldCode.deepScan",
+          "when": "view == shieldCode.findings",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "shieldCode.pickFix",
+          "when": "view == shieldCode.findings && viewItem == finding"
+        },
+        {
+          "command": "shieldCode.whyFlagged",
+          "when": "view == shieldCode.findings && viewItem == finding"
         }
       ],
       "commandPalette": [
+        {
+          "command": "shieldCode.whyFlagged",
+          "when": "false"
+        },
+        {
+          "command": "shieldCode.pickFix",
+          "when": "false"
+        },
         {
           "command": "shieldCode.previewFix",
           "when": "false"

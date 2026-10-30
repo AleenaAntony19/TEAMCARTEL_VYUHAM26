@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from shield.detect import detect
+from shield.detect import UNVERIFIED, detect, labelled_ids
 
 from . import Finding, evidence, fingerprint, mask, record_error
 
-KEEP = {"IN_AADHAAR", "IN_PAN", "IN_GSTIN", "IN_PASSPORT", "IN_UPI", "IN_BANK_ACCOUNT", "CREDIT_CARD", "EMAIL_ADDRESS", "MOBILE_IN"}
+KEEP = {"IN_AADHAAR", "IN_PAN", "IN_GSTIN", "IN_PASSPORT", "IN_UPI", "IN_BANK_ACCOUNT", "CREDIT_CARD", "EMAIL_ADDRESS", "MOBILE_IN", "IN_VOTER_ID"}
 
 
 def _embedded_ocr(path: Path) -> str:
@@ -36,14 +36,14 @@ def scan_documents(files: list[Path], root: Path, ocr: bool = True) -> list[Find
             except Exception as exc:
                 record_error(rel, "ocr", exc)
         for layer, text in layers.items():
-            for ent in detect(text):
+            for ent in detect(text) + labelled_ids(text):
                 if ent.type not in KEEP or (ent.type == "EMAIL_ADDRESS" and "example." in ent.value):
                     continue
                 ctx = text[max(0, ent.start - 40) : ent.end + 40]
                 out.append(Finding(
                     fingerprint(ent.type, rel, f"{layer}:{ctx}", ent.value), "document", ent.type,
-                    "critical" if ent.type in {"IN_AADHAAR", "CREDIT_CARD", "IN_BANK_ACCOUNT"} else "high",
-                    rel, 0, 0, 0, 0, f"{ent.type} in document layer '{layer}'", mask(ent.value, ent.type), ["ignore"],
+                    "medium" if ent.score == UNVERIFIED else "critical" if ent.type in {"IN_AADHAAR", "CREDIT_CARD", "IN_BANK_ACCOUNT"} else "high",
+                    rel, 0, 0, 0, 0, f"{ent.type} in document layer '{layer}'" + (" (labelled as this ID, failed its format or checksum check)" if ent.score == UNVERIFIED else ""), mask(ent.value, ent.type), ["ignore"],
                     confidence=round(ent.score, 2), evidence=evidence(ctx, ent.value, ent.type),
                 ))
     return out

@@ -16,6 +16,8 @@ Antigravity, Cursor and VSCodium install from Open VSX; VS Code installs from th
 - **Quick fixes** (lightbulb on a diagnostic): each opens a **diff preview**, then a modal listing every file change and note; nothing changes until you press **Apply**. Text edits are applied by the engine on disk and can be undone with git. Binary changes (image redaction) keep the original in `.shield/backup/` (git-ignored). Secret fixes always say *rotate the key*: moving a committed secret does not un-leak it.
 - **Image findings** show the OCR bounding box (`x y w h`). A PDQ fingerprint/near-duplicate finding is for matching only; it does not sanitize anything.
 - **AI Provider** panel: choose None / Groq / Anthropic Claude, paste a key (stored in VS Code Secret Storage, never in settings), **Test**. "Explain with AI" sends only rule, engine, severity and masked evidence.
+- **Shield: AI Deep Scan** (✨ in the Findings title bar): asks every time before sending image, document and text-note content to the connected provider, with values Shield already detected blanked first. Source code is not sent. It finds what no rule covers, such as a diagnosis or a home address. Images get a box you can redact, text notes get a redact fix. Up to 30 files per run: run it again for the next batch.
+- **Right-click a finding** in the tree for **Fix…** and **Why flagged** (also a lightbulb action). Why flagged shows the AI's reason in the log. Image and document findings have no lightbulb, so use the tree.
 - **Shield: Export SARIF Report** for CI / code-scanning upload.
 
 ## Development

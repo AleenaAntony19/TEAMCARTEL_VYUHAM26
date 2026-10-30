@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from shield.detect import detect
+from shield.detect import UNVERIFIED, detect, labelled_ids
 
 from .fix import FAKE_VALUES
 from . import Finding, evidence, fingerprint, mask, record_error
 
-KEEP = {"IN_AADHAAR", "IN_PAN", "IN_GSTIN", "IN_PASSPORT", "IN_UPI", "IN_BANK_ACCOUNT", "CREDIT_CARD", "EMAIL_ADDRESS", "MOBILE_IN", "GEO_COORDINATES"}
+KEEP = {"IN_AADHAAR", "IN_PAN", "IN_GSTIN", "IN_PASSPORT", "IN_UPI", "IN_BANK_ACCOUNT", "CREDIT_CARD", "EMAIL_ADDRESS", "MOBILE_IN", "GEO_COORDINATES", "IN_VOTER_ID"}
 
 
 def scan_pii(files: list[Path], root: Path, existing: list[Finding] | None = None) -> list[Finding]:
@@ -21,7 +21,7 @@ def scan_pii(files: list[Path], root: Path, existing: list[Finding] | None = Non
             continue
         lines = text.splitlines()
         for i, line in enumerate(lines, 1):
-            for ent in detect(line):
+            for ent in detect(line) + labelled_ids(line):
                 if ent.type not in KEEP or ent.value == FAKE_VALUES.get(ent.type):
                     continue  # our own synthetic test values (fake_pii) are not findings
                 if ent.type == "EMAIL_ADDRESS" and any(
@@ -33,13 +33,13 @@ def scan_pii(files: list[Path], root: Path, existing: list[Finding] | None = Non
                         id=fingerprint(ent.type, rel, line, ent.value),
                         engine="pii",
                         rule=ent.type,
-                        severity="critical" if ent.type == "IN_AADHAAR" else "high",
+                        severity="medium" if ent.score == UNVERIFIED else "critical" if ent.type == "IN_AADHAAR" else "high",
                         file=rel,
                         line=i,
                         col=ent.start + 1,
                         end_line=i,
                         end_col=ent.end + 1,
-                        message=f"{ent.type} in source",
+                        message=f"{ent.type} in source" + (" (labelled as this ID, failed its format or checksum check)" if ent.score == UNVERIFIED else ""),
                         masked=mask(ent.value, ent.type),
                         fixes=["fake_pii", "redact_pii", "ignore"],
                         confidence=round(ent.score, 2),

@@ -84,6 +84,8 @@ Deterministic analysis never needs an LLM. A provider only adds plain-language e
 
 What is sent: finding type, rule, severity, confidence, layer and **masked** evidence. Never document text or raw values. Output is labelled "advice, not evidence".
 
+**AI deep scan is the one exception.** `python -m shield.codescan scan --cognitive` (or **Shield: AI Deep Scan** in VS Code, which asks every time) sends image OCR, document text and text notes (`.txt .md .csv .tsv .log`) to the provider, to find sensitive data no rule covers. Values the detectors already know are blanked first. Answers only add findings (`AI_SENSITIVE`): each must quote the text, stays an opinion at 60% confidence, and is cached masked in `.shield/cache/cognitive.json`, so unchanged files are not sent again. Source code is not sent.
+
 > ⚠️ Any API key that was ever pasted into a chat, ticket or commit is compromised: revoke and rotate it at the provider before using this tool. No key is stored in this repo; `.githooks/pre-commit` blocks commits that contain one.
 
 ## Privacy & safety

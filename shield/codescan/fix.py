@@ -14,7 +14,7 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from shield.detect import detect, verhoeff_check_digit
+from shield.detect import detect, labelled_ids, verhoeff_check_digit
 from shield.models import Entity
 from shield.redact.image import redact_image
 
@@ -132,9 +132,16 @@ def plan_fix(root: Path, finding: dict, kind: str) -> FixPlan:
             plan.notes.append("Also in git history: rotate first, then purge with git filter-repo --replace-text <file>.")
         return plan
 
+    if kind == "redact_pii" and finding["engine"] == "cognitive":
+        line = lines[finding["line"] - 1]
+        col, end = finding["col"] - 1, finding["end_col"] - 1
+        plan.edits.append(_line_edit(rel, finding["line"], line, f"{line[:col]}[REDACTED-AI]{line[end:]}"))
+        plan.notes.append("Other AI findings in this file clear until the next AI deep scan.")
+        return plan
+
     if kind in {"redact_pii", "fake_pii"}:
         line = lines[finding["line"] - 1]
-        value = next((e.value for e in detect(line) if e.type == finding["rule"]), None)
+        value = next((e.value for e in detect(line) + labelled_ids(line) if e.type == finding["rule"]), None)
         if value is None:
             plan.notes.append("Could not locate the value on this line (file changed since scan?). Re-scan.")
             return plan
@@ -148,18 +155,27 @@ def plan_fix(root: Path, finding: dict, kind: str) -> FixPlan:
             from shield.redact.image import ocr_words
 
             text = " ".join(w for w, _ in ocr_words(path))
-            entities = [Entity(e.type, e.value, e.start, e.end, e.score) for e in detect(text)]
+            entities = [Entity(e.type, e.value, e.start, e.end, e.score) for e in detect(text) + labelled_ids(text)]
             from .media import _ocr_findings
 
             secrets_seen: list = []
             _ocr_findings(path, rel, secrets_seen)  # API keys in screenshots get blacked out too
             entities += [Entity(rule, value, 0, len(value), 0.85) for rule, value in secrets_seen]
+            from .cognitive import cached_boxes
+
+            # the redactor's FACE path fills a box; AI findings have a box but no raw value here
+            entities += [Entity("FACE", "", 0, 0, 0.6, f"bbox:{x},{y},{x + w},{y + h}") for x, y, w, h in cached_boxes(root, rel)]
         with tempfile.TemporaryDirectory() as tmp:  # never write scratch files into the workspace
             out = Path(tmp) / f"out{path.suffix}"
             redact_image(path, entities, out, aggressive=(kind == "redact_image"))
             data = out.read_bytes()
         what = f"opaque fill over {len(entities)} OCR value(s) + metadata stripped" if kind == "redact_image" else "metadata stripped"
         plan.file_ops.append(FileOp("replace_binary", rel, base64.b64encode(data).decode(), f"rewrite {rel}: {what}"))
+        if kind == "strip_exif":
+            from .cognitive import cached_boxes
+
+            if cached_boxes(root, rel):
+                plan.file_ops.append(FileOp("rehash_ai_cache", rel, summary="keep this image's AI findings: its pixels do not change"))
         plan.notes.append("The original is copied to .shield/backup/ (git-ignored) before replacement.")
         return plan
 
@@ -247,6 +263,10 @@ def apply_plan(plan: FixPlan, root: Path) -> None:
             if ".shield/backup/" not in (gi.read_text() if gi.exists() else ""):
                 apply_plan(FixPlan(file_ops=[_append(".gitignore", ".shield/backup/", "")]), root)
             p.write_bytes(base64.b64decode(op.content_b64 or ""))
+        elif op.op == "rehash_ai_cache":
+            from .cognitive import rehash
+
+            rehash(root, op.file)
         elif op.op == "bank_add":
             from .media import bank_add
 

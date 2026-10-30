@@ -63,10 +63,13 @@ class FindingsTree implements vscode.TreeDataProvider<vscode.TreeItem> {
     return all.filter((x) => x.f.severity === parent.contextValue).map(({ root, f }) => {
       const item = new vscode.TreeItem(`${f.rule} · ${f.file}${f.line ? `:${f.line}` : ""}`);
       item.description = f.masked || f.engine;
-      item.tooltip = new vscode.MarkdownString(`**${f.rule}** (${f.engine}, ${Math.round(f.confidence * 100)}% confidence)\n\n${f.message}\n\n${f.evidence ? "`" + f.evidence.replace(/`/g, "'") + "`\n\n" : ""}_${f.recommendation}_`);
+      const tip = new vscode.MarkdownString(`**${f.rule}** (${f.engine}, ${Math.round(f.confidence * 100)}% confidence)\n\n${f.message}\n\n${f.evidence ? "`" + f.evidence.replace(/`/g, "'") + "`\n\n" : ""}_${f.recommendation}_`);
+      if (f.rationale) tip.appendMarkdown("\n\n**Why:** ").appendText(f.rationale); // model text: never rendered as markdown
+      item.tooltip = tip;
+      item.contextValue = "finding";
       item.command = { command: "shieldCode.revealFinding", title: "Reveal", arguments: [root, f] };
       item.iconPath = new vscode.ThemeIcon(f.severity === "critical" || f.severity === "high" ? "error" : "warning");
-      return item;
+      return Object.assign(item, { finding: { root, f } });
     });
   }
 }
@@ -75,6 +78,7 @@ function problems(): string[] {
   return [...results.values()].flatMap((r) => [
     ...(r.stats.ocr?.startsWith("unavailable") ? [`OCR ${r.stats.ocr}`] : []),
     ...Object.entries(r.stats.engines).filter(([, v]) => v !== "ok").map(([k, v]) => `engine ${k}: ${v}`),
+    ...(r.stats.cognitive?.error ? [`AI deep scan: ${r.stats.cognitive.error}`] : []),
     ...(r.stats.errors ?? []).map((e) => `${e.file}: ${e.engine} failed (${e.error})`),
   ]);
 }
@@ -109,10 +113,10 @@ function publish(tree: FindingsTree) {
 }
 
 // ---------- scanning ----------
-async function scan(root: string, tree: FindingsTree, files?: string[], token?: vscode.CancellationToken) {
+async function scan(root: string, tree: FindingsTree, files?: string[], token?: vscode.CancellationToken, aiEnv?: Record<string, string>) {
   const s = settings();
   const engines = files ? s.engines.filter((e) => FILE_SCOPED.has(e)) : s.engines;
-  const res = await runPython(scanArgs(root, { ...s, engines, files }), { cwd: root, token, timeoutMs: (s.timeout + 15) * 1000 });
+  const res = await runPython(scanArgs(root, { ...s, engines, files, cognitive: !!aiEnv }), { cwd: root, token, timeoutMs: (s.timeout + 15) * 1000, env: aiEnv });
   if (res.code !== 0 && res.code !== 1) throw new RunError(`scanner exited ${res.code}: ${res.stderr.trim().split("\n").pop() ?? ""}`);
   if (!res.stdout.trim()) throw new RunError(`engine produced no output (exit ${res.code}): ${res.stderr.trim().split("\n").slice(-3).join(" | ") || "no stderr"}`);
   const result = parseScan(res.stdout);
@@ -127,9 +131,58 @@ async function scan(root: string, tree: FindingsTree, files?: string[], token?: 
   const st = result.stats;
   output.appendLine(`[${new Date().toISOString()}] ${root}: ${result.findings.length} findings, ${st.files} files, ${st.ms} ms, engines ${JSON.stringify(st.engines)}, OCR ${st.ocr}`);
   for (const e of st.errors ?? []) output.appendLine(`  error: ${e.file} (${e.engine}): ${e.error}`);
+  const ai = st.cognitive;
+  if (ai) output.appendLine(`  AI pass ${ai.model || "(cache only)"}: ${ai.sent} sent, ${ai.cached} cached, ${ai.skipped} over the file limit, ${ai.truncated} cut short`);
+  if (aiEnv && ai?.error) void vscode.window.showWarningMessage(`Shield: AI deep scan stopped: ${ai.error}. Run it again to carry on; finished files are kept.`);
+  if (aiEnv && ai?.skipped) void vscode.window.showWarningMessage(`Shield: ${ai.skipped} file(s) were not sent (30 per run). Run AI Deep Scan again for the next batch.`);
+  if (aiEnv && ai?.truncated) void vscode.window.showWarningMessage(`Shield: ${ai.truncated} file(s) were longer than the AI limit; only the start of each was checked.`);
   if (st.ocr?.startsWith("unavailable") && s.ocr) void vscode.window.showWarningMessage(`Shield: OCR ${st.ocr}. Image text was not scanned.`);
   if (st.timed_out) void vscode.window.showWarningMessage("Shield: some analyzers timed out; results are partial (see Scan problems).");
   publish(tree);
+}
+
+/** Per-scan consent: raw text only leaves the machine after this dialog. Null means do not scan. */
+async function deepScanConsent(ctx: vscode.ExtensionContext): Promise<Record<string, string> | null> {
+  const env = await llmEnv(ctx);
+  if (!env) {
+    const go = await vscode.window.showInformationMessage("Shield: connect Groq or Claude in the AI Provider panel first.", "Open panel");
+    if (go) await vscode.commands.executeCommand("shieldCode.ai.focus");
+    return null;
+  }
+  const choice = await vscode.window.showWarningMessage(
+    `Send image, document and text-note content from this workspace to ${env.SHIELD_LLM_PROVIDER}?`,
+    { modal: true, detail: "Used to find sensitive data no rule covers. Values Shield already detected are blanked first, the rest is sent as raw text. Source code is not sent. Up to 30 files per run, 48,000 characters each; unchanged files come from a local cache." },
+    "Send and scan",
+  );
+  return choice ? env : null;
+}
+
+function whyFlagged(f: Finding) {
+  output.appendLine(`\n[Why flagged] ${f.rule} in ${f.file}${f.line ? `:${f.line}` : ""} · ${f.engine} · ${Math.round(f.confidence * 100)}% confidence`);
+  output.appendLine(`  ${f.message}${f.masked ? ` (${f.masked})` : ""}`);
+  if (f.rationale) output.appendLine(`  AI reason (advice, not evidence): ${f.rationale}`);
+  if (f.evidence) output.appendLine(`  context: ${f.evidence}`);
+  output.appendLine(`  next: ${f.recommendation}`);
+  output.show(true);
+}
+
+async function pickFix(root: string, f: Finding, tree: FindingsTree) {
+  const pick = await vscode.window.showQuickPick(f.fixes.map((fix) => ({ label: FIX_TITLES[fix] ?? fix, fix })), { title: `Fix ${f.rule} in ${f.file}` });
+  if (pick) await previewFix(root, f, pick.fix, tree);
+}
+
+function scanAll(tree: FindingsTree, aiEnv?: Record<string, string>) {
+  return vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: aiEnv ? "Shield: AI deep scan" : "Shield: scanning workspace", cancellable: true },
+    async (progress, token) => {
+      const rs = roots();
+      if (!rs.length) return void vscode.window.showInformationMessage("Shield: open a folder first.");
+      for (const [i, r] of rs.entries()) {
+        progress.report({ message: `${path.basename(r)} (${i + 1}/${rs.length})`, increment: 100 / rs.length });
+        await scan(r, tree, undefined, token, aiEnv);
+      }
+    },
+  ).then(undefined, report);
 }
 
 function roots(): string[] {
@@ -222,18 +275,11 @@ export function activate(ctx: vscode.ExtensionContext): { lastError: () => strin
     vscode.window.registerWebviewViewProvider("shieldCode.ai", new AiViewProvider(ctx)),
     vscode.workspace.registerTextDocumentContentProvider(PREVIEW_SCHEME, { provideTextDocumentContent: (uri) => previews.get(uri.query) ?? "" }),
 
-    vscode.commands.registerCommand("shieldCode.scanWorkspace", () =>
-      vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: "Shield: scanning workspace", cancellable: true },
-        async (progress, token) => {
-          const rs = roots();
-          if (!rs.length) return void vscode.window.showInformationMessage("Shield: open a folder first.");
-          for (const [i, r] of rs.entries()) {
-            progress.report({ message: `${path.basename(r)} (${i + 1}/${rs.length})`, increment: 100 / rs.length });
-            await scan(r, tree, undefined, token);
-          }
-        },
-      ).then(undefined, report)),
+    vscode.commands.registerCommand("shieldCode.scanWorkspace", () => scanAll(tree)),
+    vscode.commands.registerCommand("shieldCode.deepScan", async () => {
+      const aiEnv = await deepScanConsent(ctx);
+      if (aiEnv) await scanAll(tree, aiEnv);
+    }),
 
     vscode.commands.registerCommand("shieldCode.scanFile", async () => {
       const doc = vscode.window.activeTextEditor?.document;
@@ -252,6 +298,8 @@ export function activate(ctx: vscode.ExtensionContext): { lastError: () => strin
     vscode.commands.registerCommand("shieldCode.previewFix", (root: string, f: Finding, kind: string) => previewFix(root, f, kind, tree).catch(report)),
     vscode.commands.registerCommand("shieldCode.explainFinding", (f: Finding) => explain(f, ctx).catch(report)),
     vscode.commands.registerCommand("shieldCode.showOutput", () => output.show()),
+    vscode.commands.registerCommand("shieldCode.whyFlagged", (item: { finding: { f: Finding } }) => whyFlagged(item.finding.f)),
+    vscode.commands.registerCommand("shieldCode.pickFix", (item: { finding: { root: string; f: Finding } }) => pickFix(item.finding.root, item.finding.f, tree).catch(report)),
 
     vscode.commands.registerCommand("shieldCode.runSwarm", async () => {
       const root = roots()[0];
@@ -316,6 +364,9 @@ export function activate(ctx: vscode.ExtensionContext): { lastError: () => strin
             a.command = { command: "shieldCode.previewFix", title: "Preview fix", arguments: [folder.uri.fsPath, f, kind] };
             actions.push(a);
           }
+          const why = new vscode.CodeAction("Shield: Why flagged", vscode.CodeActionKind.Empty);
+          why.command = { command: "shieldCode.whyFlagged", title: "Why flagged", arguments: [{ finding: { f } }] };
+          actions.push(why);
           const ex = new vscode.CodeAction("Shield: Explain with AI (masked data only)", vscode.CodeActionKind.Empty);
           ex.command = { command: "shieldCode.explainFinding", title: "Explain", arguments: [f] };
           actions.push(ex);

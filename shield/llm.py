@@ -1,6 +1,7 @@
 """LLM providers for optional explanations. Deterministic analyzers never depend on this.
 
 What is sent: finding type, rule, analyzer, severity and *masked* evidence only.
+One exception: codescan/cognitive.py sends file text, only on an explicit per-scan request.
 Keys come from env (GROQ_API_KEY / ANTHROPIC_API_KEY) or are set at runtime in memory; never logged or returned.
 """
 from __future__ import annotations
@@ -18,7 +19,7 @@ import httpx
 PROVIDERS = {
     "groq": {
         "endpoint": "https://api.groq.com/openai/v1/chat/completions",
-        "model": "openai/gpt-oss-20b",
+        "model": "llama-3.1-8b-instant",
         "key_env": "GROQ_API_KEY",
     },
     "anthropic": {
@@ -45,7 +46,7 @@ class LLMConfig:
     model: str = ""
     endpoint: str = ""
     timeout: float = 20.0
-    retries: int = 2
+    retries: int = 4
     api_key: str = field(default="", repr=False)
 
     def public(self) -> dict:
@@ -124,6 +125,17 @@ def _text(cfg: LLMConfig, data: dict) -> str:
     if cfg.provider == "groq":
         return data["choices"][0]["message"]["content"].strip()
     return "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text").strip()
+
+
+def parse_json(text: str) -> dict | None:
+    m = re.search(r"\{.*\}", text or "", re.S)
+    if not m:
+        return None
+    try:
+        v = json.loads(m.group(0))
+        return v if isinstance(v, dict) else None
+    except ValueError:
+        return None
 
 
 _PACE = {"lock": threading.Lock(), "not_before": 0.0}

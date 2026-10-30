@@ -8,6 +8,7 @@
 | When | What | Where |
 |---|---|---|
 | LLM provider configured and "Explain" used | finding type, rule, engine, severity, confidence, layer, masked evidence | Groq or Anthropic endpoint (https only) |
+| AI deep scan (opt-in, asked every scan: `--cognitive`, or the **AI Deep Scan** command and its dialog) | **raw text** of images (OCR), documents and text notes (`.txt .md .csv .tsv .log`), never source code, with values the detectors already know blanked first. Max 30 files, 48,000 characters each | Groq or Anthropic endpoint. `SHIELD_LOCAL_ONLY=1` turns it off |
 | Agent swarm run (opt-in) | masked findings, masked tool observations (OCR text is masked), agent prompts | Groq or Anthropic endpoint |
 | LLM provider configured and discovery run | org, domain, entity type names | same |
 | Search provider configured | firewall-approved query strings (org/domain + generic terms) | Brave or Google Programmable Search |
@@ -28,6 +29,7 @@
 
 ## Agent swarm guarantees
 - Tools address findings by id; raw values stay in the engine process.
+- AI deep scan is the one path that sends raw file text. Its model answers are untrusted: an item counts only if it quotes the text, it cannot rate itself critical, it can only add findings, and `.shield/cache/cognitive.json` keeps masked findings only (git-ignored by its own `.gitignore`).
 - The redaction tool enforces a floor that no LLM verdict can lower.
 - A "keep" must be grounded in a PragmaticDev challenge.
 - The workspace swarm writes code only through `refactor_code_secret`, which checks Python with `ast` and backs up the original first. The VS Code command asks for confirmation.

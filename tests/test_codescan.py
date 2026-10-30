@@ -1,4 +1,5 @@
 import json
+import random
 import secrets
 import string
 import subprocess
@@ -172,7 +173,9 @@ def test_dark_code_screenshot_secrets_found_separately_and_redacted(tmp_path):
     import pytesseract
     from PIL import Image, ImageDraw, ImageFont
 
-    groq, aws = "gsk_" + _rand(44), "AKIA" + "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(16))
+    rng = random.Random(7)  # fixed: tesseract misreads about 1 random key in 60, which is OCR noise, not this test's subject
+    groq = "gsk_" + "".join(rng.choices(string.ascii_letters + string.digits, k=44))
+    aws = "AKIA" + "".join(rng.choices(string.ascii_uppercase + string.digits, k=16))
     img = Image.new("RGB", (1500, 220), (30, 30, 30))
     d = ImageDraw.Draw(img)
     font = ImageFont.load_default(size=30)
@@ -195,7 +198,58 @@ def test_dark_code_screenshot_secrets_found_separately_and_redacted(tmp_path):
     assert not [f for f in scan(tmp_path, engines=["media"])["findings"] if f["rule"] == "OCR_SECRET"], "backup in .shield/ must not be re-scanned"
 
 
+def test_ocr_split_aws_key_is_rejoined(tmp_path, monkeypatch):
+    from shield.codescan import media
+
+    words = [("AWS_KEY", (0, 0, 80, 10)), ("=", (90, 0, 10, 10)), ("AKIAEUH3Y2OLC559F", (110, 0, 170, 10)), ("TAF", (285, 0, 30, 10))]
+    monkeypatch.setattr(media, "ocr_words", lambda p: words)
+    seen = []
+    found = media._ocr_findings(tmp_path / "x.png", "x.png", seen)
+    assert [(f.rule, f.bbox) for f in found] == [("OCR_SECRET", [110, 0, 205, 10])] and seen == [("AWS Access Key", "AKIAEUH3Y2OLC559FTAF")]
+    monkeypatch.setattr(media, "ocr_words", lambda p: [("gsk_" + "aB3" * 7 + "£" + "cD4" * 7 + "e2", (0, 0, 400, 10))])
+    assert [f.rule for f in media._ocr_findings(tmp_path / "x.png", "x.png")] == ["OCR_SECRET"], "a misread glyph must not hide the key"
+
+
 def test_aws_documentation_example_key_is_not_a_finding(tmp_path):
     (tmp_path / "a.py").write_text('K = "AKIAIOSFODNN7EXAMPLE"\nR = "AKIA' + "Q" * 16 + '"\n')
     rules = [(f["rule"], f["line"]) for f in scan(tmp_path, engines=["secrets"], ocr=False)["findings"] if f["rule"] == "AWS Access Key"]
     assert rules == [("AWS Access Key", 2)]
+
+
+@pytest.mark.parametrize("text,typ,value", [
+    ("Aadhaar No = 123456789012", "IN_AADHAAR", "123456789012"),
+    ('"invalid_sample_aadhaar": "1234 5678 9012"', "IN_AADHAAR", "1234 5678 9012"),
+    ("aadhar: 12345678901", "IN_AADHAAR", "12345678901"),
+    ("voter id = ABCD1234QUYUi", "IN_VOTER_ID", "ABCD1234QUYUi"),
+    ("EPIC No: XYZ12345", "IN_VOTER_ID", "XYZ12345"),
+    ("PAN card ABCD12345", "IN_PAN", "ABCD12345"),
+    ("passport number 12345", None, None),
+    ("Your Aadhaar number is required, voter id too", None, None),
+    ("Aadhaar 2345 6789 0124", None, None),  # valid: detect() owns it
+    ("voter id = ABC1234567", None, None),  # valid
+    ("Aadhaar: XXXX XXXX 2346", None, None),  # already masked
+    ("Aadhaar [REDACTED-IN_AADHAAR]", None, None),
+    ("the frying pan 123456", None, None),
+    ("pan_id = get_pan(1234567)", None, None),
+])
+def test_labelled_ids(text, typ, value):
+    from shield.detect import labelled_ids
+
+    assert [(e.type, e.value) for e in labelled_ids(text)] == ([(typ, value)] if typ else [])
+
+
+def test_unverified_id_in_text_is_medium_fixable_and_valid_voter_id_is_kept(tmp_path):
+    (tmp_path / "a.txt").write_text("Aadhaar No = 123456789012\nvoter id = ABC1234567\n")
+    res = scan(tmp_path, engines=["pii"], ocr=False)
+    by = {f["rule"]: f for f in res["findings"]}
+    assert by["IN_AADHAAR"]["severity"] == "medium" and "failed" in by["IN_AADHAAR"]["message"]
+    assert by["IN_VOTER_ID"]["severity"] == "high"
+    assert "123456789012" not in json.dumps(res)
+    apply_plan(plan_fix(tmp_path, by["IN_AADHAAR"], "redact_pii"), tmp_path)
+    assert "123456789012" not in (tmp_path / "a.txt").read_text()
+
+
+def test_unverified_id_is_not_sent_to_the_ai():
+    from shield.codescan.cognitive import blank_known
+
+    assert "123456789012" not in blank_known("Aadhaar No = 123456789012 for this person")

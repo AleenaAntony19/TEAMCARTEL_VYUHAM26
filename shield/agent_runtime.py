@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from . import llm
+from .llm import parse_json
 from .mcp.tools import SESSIONS, server
 
 MAX_CHILDREN = 4
@@ -47,17 +48,6 @@ class AgentResult:
     def summary(self) -> dict:
         return {"name": self.name, "steps": self.steps_taken, "tokens": self.tokens, "tools": [c["name"] for c in self.tool_calls],
                 "verdict": self.verdict, "error": self.error, "children": [c.summary() for c in self.children]}
-
-
-def parse_json(text: str) -> dict | None:
-    m = re.search(r"\{.*\}", text or "", re.S)
-    if not m:
-        return None
-    try:
-        v = json.loads(m.group(0))
-        return v if isinstance(v, dict) else None
-    except ValueError:
-        return None
 
 
 async def mcp_tools(names: list[str]) -> list[dict]:

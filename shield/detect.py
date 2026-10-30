@@ -192,6 +192,38 @@ def detect(text: str, layer: str = "visible") -> list[Entity]:
     return chosen
 
 
+UNVERIFIED = 0.5  # score of labelled_ids hits: named as an ID, but failed the format or checksum check
+_ID_VALUE = r"(?=[A-Za-z0-9/-]*\d)[A-Za-z0-9/-]{6,20}"
+_ID_LABELS = {
+    "IN_AADHAAR": (r"aadhaa?r|uidai?", r"\d(?:[\s-]*\d){9,15}"),
+    "IN_VOTER_ID": (r"voter[\s_-]*id|epic[\s_-]*(?:no|number)", _ID_VALUE),
+    "IN_PAN": (r"pan[\s_-]*(?:no|number|card)|(?-i:PAN)", _ID_VALUE),
+    "IN_PASSPORT": (r"passport", _ID_VALUE),
+}
+_ID_LABELLED = {
+    typ: re.compile(
+        rf"(?<![A-Za-z])(?:{label})(?:[\s_-]*(?:card|no|num|number|id))*\.?[\"']?\s*[:=#-]?\s*[\"']?({value})(?![A-Za-z0-9_])",
+        re.I,
+    )
+    for typ, (label, value) in _ID_LABELS.items()
+}
+
+
+def labelled_ids(text: str, layer: str = "visible") -> list[Entity]:
+    """Values a label calls a government ID that detect() rejected: a misread or mistyped real ID fails its
+    checks too, so scanners report these as unverified. Kept out of detect(), whose hits are verified."""
+    hits = [(typ, m) for typ, rx in _ID_LABELLED.items() for m in rx.finditer(text)]
+    if not hits:
+        return []
+    known = detect(text, layer)
+    out = []
+    for typ, m in hits:
+        a, z = m.span(1)
+        if not any(e.start < z and e.end > a for e in known + out):
+            out.append(Entity(typ, m.group(1), a, z, UNVERIFIED, layer))
+    return out
+
+
 def variants(value: str) -> set[str]:
     out = {value}
     stripped = re.sub(r"[\s\-]", "", value)
