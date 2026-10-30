@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag like v0.5.0 (must equal vscode/package.json "version").
+# Push a tag like v0.5.1 (must equal vscode/package.json "version").
 on:
   push:
     tags: ["v*"]
@@ -17,7 +17,7 @@ jobs:
         include:
           - os: windows-latest
             target: win32-x64
-          - os: macos-14
+          - os: macos-15  # macos-14 is retired on 2026-11-02
             target: darwin-arm64
           - os: ubuntu-22.04
             target: linux-x64

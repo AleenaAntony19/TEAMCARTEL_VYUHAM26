@@ -29,5 +29,8 @@ jobs:
         run: bash scripts/get_models.sh
       - name: Full validation (pytest, ruff, web, extension, mock crawl)
         run: bash scripts/validate.sh
+      - name: Extension packages from a clean checkout
+        working-directory: vscode
+        run: rm -rf dist && npx vsce package --no-dependencies -o /tmp/shield-code.vsix
       - name: No secrets committed
         run: PYTHONPATH=. python -m shield.codescan scan . --engines secrets --no-ocr --format md

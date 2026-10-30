@@ -2,7 +2,7 @@
   "name": "shield-code",
   "displayName": "Shield\u00b7Code",
   "description": "Scan a workspace for secrets, Indian PII, unsafe code, risky config and sensitive images/documents; review and apply safe fixes with a preview.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "publisher": "aaron43210",
   "license": "UNLICENSED",
   "icon": "media/icon.png",
@@ -252,6 +252,7 @@
     }
   },
   "scripts": {
+    "vscode:prepublish": "npm run build",
     "build": "node esbuild.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",

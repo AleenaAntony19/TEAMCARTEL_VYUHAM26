@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.5.1
+- Release builds now compile the extension. First Open VSX release.
+
 ## 0.5.0
 - **Shield: AI Deep Scan**: asks, then sends image, document and text-note content to the connected provider to find sensitive data no rule covers.
 - **Why flagged** and **Fix…** on findings in the tree, so image and document findings can be fixed.
