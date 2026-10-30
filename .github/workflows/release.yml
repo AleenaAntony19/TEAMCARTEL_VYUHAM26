@@ -27,15 +27,15 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Tag matches extension version
         run: |
           want="v$(node -p "require('./vscode/package.json').version")"
           [ "$want" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != $want"; exit 1; }
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - name: Engine deps (minimal)
@@ -58,7 +58,7 @@ jobs:
           npm run typecheck && npm test
           rm -rf engine && mkdir engine && cp -RL ../dist/shield-engine engine/  # -L: VSIX (zip) cannot hold symlinks
           npx vsce package --no-dependencies --target ${{ matrix.target }} -o ../shield-code-${{ matrix.target }}.vsix
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vsix-${{ matrix.target }}
           path: shield-code-${{ matrix.target }}.vsix
@@ -68,15 +68,15 @@ jobs:
     name: universal VSIX (no engine; uses Python if set)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - working-directory: vscode
         run: |
           npm ci --no-audit --no-fund
           npx vsce package --no-dependencies -o ../shield-code-universal.vsix
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vsix-universal
           path: shield-code-universal.vsix
@@ -85,7 +85,7 @@ jobs:
     needs: [engine, universal]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: vsix-*
           merge-multiple: true
@@ -105,11 +105,11 @@ jobs:
       OVSX_PAT: ${{ secrets.OVSX_PAT }}
       VSCE_PAT: ${{ secrets.VSCE_PAT }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: vsix-*
           merge-multiple: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - name: Open VSX (Antigravity, Cursor, VSCodium)
