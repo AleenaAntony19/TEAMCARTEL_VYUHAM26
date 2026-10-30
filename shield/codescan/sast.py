@@ -2,16 +2,33 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 from . import SKIP_DIRS, Finding, fingerprint
+
+
+def _flagged_line(code: str, line: int) -> str:
+    """Bandit's snippet includes neighbouring lines (which may hold secrets): keep the flagged one, masked."""
+    from . import evidence
+
+    for raw in code.splitlines():
+        num, _, rest = raw.strip().partition(" ")
+        if num == str(line):
+            return evidence(rest, "", "sast")
+    return ""
+
+
+def _bandit_cmd() -> list[str]:
+    # frozen engine ships bandit inside itself (`shield-engine bandit`); otherwise use this interpreter's module
+    return [sys.executable, "bandit"] if getattr(sys, "frozen", False) else [sys.executable, "-m", "bandit"]
 
 
 def scan_sast(root: Path, exclude: tuple[str, ...] = ()) -> list[Finding]:
     skip = ",".join(str(root / d) for d in sorted(SKIP_DIRS)) + "".join("," + str(root / e) for e in exclude if "*" not in e)
     try:
         proc = subprocess.run(
-            ["bandit", "-r", str(root), "-f", "json", "-q", "-x", skip],
+            [*_bandit_cmd(), "-r", str(root), "-f", "json", "-q", "-x", skip],
             capture_output=True,
             text=True,
             timeout=90,
@@ -47,7 +64,7 @@ def scan_sast(root: Path, exclude: tuple[str, ...] = ()) -> list[Finding]:
                 masked="",
                 fixes=["yaml_safe_load"] if rule == "B506" else (["requests_verify"] if rule == "B501" else ["ignore"]),
                 confidence={"HIGH": 0.9, "MEDIUM": 0.7, "LOW": 0.5}.get(item.get("issue_confidence", "LOW"), 0.5),
-                evidence=text.strip().splitlines()[0][:200] if text.strip() else "",
+                evidence=_flagged_line(text, line),
             )
         )
     return out

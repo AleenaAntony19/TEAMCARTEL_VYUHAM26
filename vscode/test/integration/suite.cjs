@@ -17,11 +17,15 @@ exports.run = async () => {
   const ws = vscode.workspace.workspaceFolders[0].uri.fsPath;
   const ext = vscode.extensions.getExtension("shield-scout.shield-code");
   assert.ok(ext, "extension installed");
-  await ext.activate();
+  const api = await ext.activate();
+  const fs = require("node:fs");
+  const exe = path.join(ext.extensionPath, "engine", "shield-engine", process.platform === "win32" ? "shield-engine.exe" : "shield-engine");
+  console.log(`SHIELD-IT engine: ${exe} exists=${fs.existsSync(exe)} pythonPath=${JSON.stringify(vscode.workspace.getConfiguration("shieldCode").get("pythonPath"))}`);
 
   await vscode.commands.executeCommand("shieldCode.scanWorkspace");
   const cfg = vscode.Uri.file(path.join(ws, "app", "config.py"));
-  const diags = await until(() => { const d = vscode.languages.getDiagnostics(cfg); return d.length ? d : null; });
+  const diags = await until(() => { const d = vscode.languages.getDiagnostics(cfg); return d.length ? d : null; })
+    .catch((e) => { throw new Error(`${e.message}; extension error: ${api.lastError()}`); });
   const secret = diags.find((d) => d.code === "OpenAI Token");
   assert.ok(secret, "OpenAI key diagnostic in config.py");
   assert.ok(!secret.message.includes(process.env.SHIELD_TEST_KEY), "diagnostic must not show the raw key");

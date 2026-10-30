@@ -4,7 +4,7 @@ import {
   FILE_SCOPED, FIX_TITLES, applyEdits, atLeast, debounce, describe, findingRange, parseScan, scanArgs,
   type Finding, type FixPlan, type ScanResult, type Severity,
 } from "./core.ts";
-import { RunError, runPython } from "./runner.ts";
+import { RunError, runPython, setExtensionRoot } from "./runner.ts";
 import { AiViewProvider, llmEnv } from "./aiView.ts";
 import { toolJson, withMcp } from "./mcpClient.ts";
 
@@ -49,7 +49,14 @@ class FindingsTree implements vscode.TreeDataProvider<vscode.TreeItem> {
         .map((g) => Object.assign(new vscode.TreeItem(`${g.s} (${g.n})`, vscode.TreeItemCollapsibleState.Expanded), { id: `sev:${g.s}`, contextValue: g.s }));
       const notes = problems();
       if (notes.length) groups.push(Object.assign(new vscode.TreeItem(`Scan problems (${notes.length})`, vscode.TreeItemCollapsibleState.Collapsed), { id: "problems", contextValue: "problems", iconPath: new vscode.ThemeIcon("warning") }));
-      if (!groups.length) groups.push(new vscode.TreeItem(results.size ? "No findings" : "Run “Shield: Scan Workspace”"));
+      if (!groups.length) {
+        const item = new vscode.TreeItem(results.size ? "No findings" : "▶ Click here to Scan Workspace");
+        if (!results.size) {
+          item.command = { command: "shieldCode.scanWorkspace", title: "Scan Workspace" };
+          item.iconPath = new vscode.ThemeIcon("play");
+        }
+        groups.push(item);
+      }
       return groups;
     }
     if (parent.id === "problems") return problems().map((t) => new vscode.TreeItem(t));
@@ -107,6 +114,7 @@ async function scan(root: string, tree: FindingsTree, files?: string[], token?: 
   const engines = files ? s.engines.filter((e) => FILE_SCOPED.has(e)) : s.engines;
   const res = await runPython(scanArgs(root, { ...s, engines, files }), { cwd: root, token, timeoutMs: (s.timeout + 15) * 1000 });
   if (res.code !== 0 && res.code !== 1) throw new RunError(`scanner exited ${res.code}: ${res.stderr.trim().split("\n").pop() ?? ""}`);
+  if (!res.stdout.trim()) throw new RunError(`engine produced no output (exit ${res.code}): ${res.stderr.trim().split("\n").slice(-3).join(" | ") || "no stderr"}`);
   const result = parseScan(res.stdout);
   if (files && results.has(root)) {
     // merge: replace only this file's findings from file-scoped engines
@@ -128,9 +136,12 @@ function roots(): string[] {
   return (vscode.workspace.workspaceFolders ?? []).filter((f) => f.uri.scheme === "file").map((f) => f.uri.fsPath);
 }
 
+let lastError = "";
+
 function report(e: unknown) {
   if (e instanceof vscode.CancellationError) return;
   const msg = e instanceof Error ? e.message : String(e);
+  lastError = msg;
   output.appendLine(`error: ${msg}`);
   void vscode.window.showErrorMessage(`Shield: ${msg}`, "Show log").then((c) => c && output.show());
 }
@@ -195,7 +206,8 @@ async function explain(f: Finding, ctx: vscode.ExtensionContext) {
 }
 
 // ---------- activation ----------
-export function activate(ctx: vscode.ExtensionContext) {
+export function activate(ctx: vscode.ExtensionContext): { lastError: () => string } {
+  setExtensionRoot(ctx.extensionPath); // locates the bundled engine in platform builds
   output = vscode.window.createOutputChannel("Shield·Code");
   diagnostics = vscode.languages.createDiagnosticCollection("shield");
   status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
@@ -282,12 +294,11 @@ export function activate(ctx: vscode.ExtensionContext) {
       const target = await vscode.window.showSaveDialog({ defaultUri: vscode.Uri.file(path.join(root, "shield-report.sarif")), filters: { SARIF: ["sarif", "json"] } });
       if (!target) return;
       const s = settings();
-      await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Shield: exporting SARIF", cancellable: true }, (_p, token) =>
-        {
-          const args = scanArgs(root, s);
-          args[args.indexOf("--format") + 1] = "sarif";
-          return runPython([...args, "--out", target.fsPath], { cwd: root, token, timeoutMs: (s.timeout + 15) * 1000 });
-        },
+      await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Shield: exporting SARIF", cancellable: true }, (_p, token) => {
+        const args = scanArgs(root, s);
+        args[args.indexOf("--format") + 1] = "sarif";
+        return runPython([...args, "--out", target.fsPath], { cwd: root, token, timeoutMs: (s.timeout + 15) * 1000 });
+      },
       ).then(() => vscode.window.showInformationMessage(`Shield: SARIF written to ${target.fsPath}`), report);
     }),
 
@@ -320,6 +331,7 @@ export function activate(ctx: vscode.ExtensionContext) {
     scan(folder.uri.fsPath, tree, [path.relative(folder.uri.fsPath, doc.uri.fsPath)]).catch(report);
   }, 1000);
   ctx.subscriptions.push(vscode.workspace.onDidSaveTextDocument(onSave));
+  return { lastError: () => lastError }; // used by the integration test
 }
 
-export function deactivate() {}
+export function deactivate() { }

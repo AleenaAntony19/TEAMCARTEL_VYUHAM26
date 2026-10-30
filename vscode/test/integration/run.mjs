@@ -18,7 +18,9 @@ for (const d of ["app", "tests", "docs", ".vscode"]) mkdirSync(path.join(ws, d),
 writeFileSync(path.join(ws, "app/config.py"), `DEBUG = False\nOPENAI_API_KEY = "${key}"\n`);
 writeFileSync(path.join(ws, "tests/users.json"), JSON.stringify({ aadhaar: "2345 6789 0124" }));
 copyFileSync(path.join(engine, "demo/out/kyc.png"), path.join(ws, "docs/kyc.png"));
-writeFileSync(path.join(ws, ".vscode/settings.json"), JSON.stringify({ "shieldCode.pythonPath": python, "shieldCode.enginePath": engine }));
+// SHIELD_IT_BUNDLED=1: no Python settings at all, so the extension must use vscode/engine/shield-engine
+const bundled = process.env.SHIELD_IT_BUNDLED === "1";
+writeFileSync(path.join(ws, ".vscode/settings.json"), JSON.stringify(bundled ? {} : { "shieldCode.pythonPath": python, "shieldCode.enginePath": engine }));
 execFileSync("git", ["init", "-q"], { cwd: ws });
 
 await runTests({

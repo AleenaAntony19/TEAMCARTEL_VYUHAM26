@@ -1,0 +1,17 @@
+# Minimal deps for the standalone engine (codescan + MCP + LLM helper). Used by engine/build.py and CI.
+pymupdf==1.28.2
+lxml==6.0.3
+python-docx==1.2.0
+openpyxl==3.1.5
+Pillow==11.3.0
+pytesseract==0.3.13
+opencv-python-headless==4.10.0.84
+numpy>=1.26,<2.3
+pdqhash==0.2.8
+httpx==0.28.1
+beautifulsoup4==4.14.3
+PyYAML>=6
+detect-secrets==1.5.0
+bandit==1.9.4
+mcp==2.3.0
+pyinstaller==6.22.3
