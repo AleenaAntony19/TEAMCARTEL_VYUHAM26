@@ -107,6 +107,14 @@ with tabs[1]:
                 st.status(f"🤖 Agent: {ev['agent']}", state="complete")
             elif ev["kind"] == "detect":
                 st.write(f"**Detected:** {ev['counts']}  — severity **{ev['severity']}** (score {ev['score']})")
+            elif ev["kind"] == "deliberation":
+                with st.expander("🗣️ Live Multi-Persona Deliberation & Dialectic Swarm", expanded=True):
+                    for log in ev["logs"]:
+                        verdict_color = "🟢" if log["verdict"] == "CONFIRMED" else "🟡"
+                        st.markdown(f"**Entity Target:** `{log['val']}` ({log['type']}) {verdict_color} Verdict: **{log['verdict']}** (Confidence: {log['score']:.2f})")
+                        for t in log["turns"]:
+                            st.caption(f"{t['avatar']} **{t['persona']}** [{t['action']}]: {t['argument']}")
+                        st.markdown("---")
             elif ev["kind"] == "redact":
                 st.write(f"✅ Sanitized: `{ev['output']}`")
             elif ev["kind"] == "attack":

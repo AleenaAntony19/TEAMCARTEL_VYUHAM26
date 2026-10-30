@@ -115,3 +115,4 @@ To ensure legal admissibility under India's **Section 63 of the Bharatiya Sakshy
 2. **Network Sandboxing:** Network access is isolated to the safe fetcher module with strict IP verification (`is_public()`).
 3. **Ephemeral Biometrics:** Face vectors and raw images exist only in process RAM and are instantly wiped when the session terminates or when the user clicks **End Session & Wipe**.
 4. **No Autonomous Dispatch:** Incident reports, takedown notices under Rule 3(2)(b) of the IT Rules 2021, and NCRP cybercrime drafts are created in draft mode for user review—never automatically transmitted to third parties without human confirmation.
+

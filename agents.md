@@ -164,3 +164,4 @@ When candidate PII has ambiguous confidence (between 0.40 and 0.75) or when esti
 
 ### 7.4 `EvidenceAgent`
 * **Legal Role:** Captures full-page DOM-blurred screenshots, HAR network traces (omitting image bodies), RDAP abuse emails, CDN signatures, and Section 63 BSA certificate bundles.
+
