@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from .models import Entity
+from .models import Entity, RankedEntity, SeverityFactors
 
 # ---------- Verhoeff ----------
 _D = (
@@ -174,48 +174,313 @@ def variants(value: str) -> set[str]:
     return {v for v in out if v}
 
 
-def severity(entities: list[Entity]) -> tuple[int, str, list[str]]:
+# ---------- 5-Factor Privacy Severity & Ranking Engine ----------
+# Weights: Intrinsic Sensitivity (30%), Exploitability (20%), Linkability (25%), Exposure Context (15%), Frequency (10%)
+WEIGHT_SENSITIVITY = 0.30
+WEIGHT_EXPLOITABILITY = 0.20
+WEIGHT_LINKABILITY = 0.25
+WEIGHT_CONTEXT = 0.15
+WEIGHT_FREQUENCY = 0.10
+
+INTRINSIC_SENSITIVITY: dict[str, float] = {
+    "FACE": 100.0,
+    "IN_AADHAAR": 100.0,
+    "CREDIT_CARD": 95.0,
+    "IN_BANK_ACCOUNT": 90.0,
+    "IN_PAN": 85.0,
+    "IN_PASSPORT": 85.0,
+    "IN_UPI": 75.0,
+    "IN_IFSC": 60.0,
+    "IN_GSTIN": 55.0,
+    "MOBILE_IN": 60.0,
+    "EMAIL_ADDRESS": 50.0,
+    "PERSON": 30.0,
+    "LOCATION": 25.0,
+    "ORG": 20.0,
+    "DATE_TIME": 15.0,
+}
+
+EXPLOITABILITY: dict[str, float] = {
+    "CREDIT_CARD": 95.0,
+    "IN_UPI": 90.0,
+    "IN_AADHAAR": 90.0,
+    "IN_BANK_ACCOUNT": 85.0,
+    "IN_PAN": 75.0,
+    "IN_PASSPORT": 70.0,
+    "FACE": 70.0,
+    "MOBILE_IN": 65.0,
+    "EMAIL_ADDRESS": 50.0,
+    "IN_GSTIN": 45.0,
+    "IN_IFSC": 40.0,
+    "PERSON": 25.0,
+    "LOCATION": 15.0,
+    "ORG": 15.0,
+    "DATE_TIME": 15.0,
+}
+
+
+def mask_value(value: str, entity_type: str) -> str:
+    """Mask sensitive value for privacy-safe reporting and logs."""
+    if not value:
+        return ""
+    val = value.strip()
+    if entity_type == "FACE":
+        return "[BIOMETRIC EMBEDDING]"
+    if entity_type == "IN_AADHAAR":
+        digits = re.sub(r"\D", "", val)
+        if len(digits) == 12:
+            return f"XXXX XXXX {digits[-4:]}"
+        return "XXXX XXXX " + val[-4:] if len(val) >= 4 else "****"
+    if entity_type == "IN_PAN":
+        if len(val) == 10:
+            return f"{val[:2]}****{val[-1]}"
+        return val[:2] + "****" if len(val) >= 2 else "****"
+    if entity_type == "CREDIT_CARD":
+        digits = re.sub(r"\D", "", val)
+        if len(digits) >= 4:
+            return f"****-****-****-{digits[-4:]}"
+        return "****-****-****-****"
+    if entity_type == "IN_BANK_ACCOUNT":
+        if len(val) > 4:
+            return "*" * (len(val) - 4) + val[-4:]
+        return "****"
+    if entity_type == "MOBILE_IN":
+        digits = re.sub(r"\D", "", val)
+        if len(digits) >= 10:
+            return f"+91 {digits[-10:-7]}*** **{digits[-2:]}"
+        return val[:4] + "****" if len(val) >= 4 else "****"
+    if entity_type == "EMAIL_ADDRESS":
+        if "@" in val:
+            user, domain = val.split("@", 1)
+            masked_user = f"{user[0]}***{user[-1]}" if len(user) > 2 else user[:1] + "***"
+            return f"{masked_user}@{domain}"
+        return val[:2] + "***"
+    if entity_type == "IN_UPI":
+        if "@" in val:
+            user, domain = val.split("@", 1)
+            masked_user = f"{user[0]}***" if user else "***"
+            return f"{masked_user}@{domain}"
+        return val[:2] + "***"
+    if entity_type == "PERSON":
+        parts = val.split()
+        masked_parts = [f"{p[0]}***" if p else "*" for p in parts]
+        return " ".join(masked_parts)
+    if len(val) > 4:
+        return f"{val[:2]}****{val[-2:]}"
+    return "****"
+
+
+def _calc_linkability(typ: str, types: set[str]) -> float:
+    has_person = "PERSON" in types
+    has_contact = bool({"MOBILE_IN", "EMAIL_ADDRESS"} & types)
+    has_gov_id = bool({"IN_AADHAAR", "IN_PAN", "IN_PASSPORT"} & types)
+    has_finance = bool({"IN_BANK_ACCOUNT", "CREDIT_CARD", "IN_UPI"} & types)
+    has_datetime = "DATE_TIME" in types
+    has_ifsc = "IN_IFSC" in types
+
+    if typ == "IN_AADHAAR":
+        return 100.0 if (has_person or has_contact) else (90.0 if has_finance else 70.0)
+    if typ == "IN_PAN":
+        if has_person and has_datetime:
+            return 100.0
+        return 90.0 if (has_person or has_contact) else 65.0
+    if typ == "IN_BANK_ACCOUNT":
+        if has_ifsc and has_person:
+            return 100.0
+        return 85.0 if (has_ifsc or has_person) else 55.0
+    if typ == "CREDIT_CARD":
+        return 95.0 if has_person else 75.0
+    if typ == "IN_UPI":
+        return 85.0 if (has_person or has_contact) else 60.0
+    if typ == "FACE":
+        return 100.0 if has_person else (90.0 if has_gov_id else 70.0)
+    if typ in ("MOBILE_IN", "EMAIL_ADDRESS"):
+        return 90.0 if has_person else (80.0 if (has_gov_id or has_finance) else (50.0 if len(types) > 1 else 30.0))
+    if typ == "PERSON":
+        return 95.0 if (has_gov_id or has_finance) else (80.0 if has_contact else (40.0 if len(types) > 1 else 20.0))
+    if typ == "IN_IFSC":
+        return 80.0 if has_finance else 30.0
+    return 50.0 if (has_person or has_gov_id) else 20.0
+
+
+def _calc_exposure_context(layer: str) -> float:
+    l = (layer or "visible").lower()
+    if any(k in l for k in ("metadata", "exif", "gps")):
+        return 100.0
+    if any(k in l for k in ("embedded", "hidden", "veryhidden", "del")):
+        return 95.0
+    if any(k in l for k in ("annotation", "comment")):
+        return 80.0
+    if "ocr" in l:
+        return 70.0
+    if "bbox" in l:
+        return 75.0
+    return 65.0
+
+
+def _calc_frequency(count: int) -> float:
+    if count <= 1:
+        return 40.0
+    if count == 2:
+        return 60.0
+    if count == 3:
+        return 80.0
+    return 100.0
+
+
+def _get_band(score: float) -> str:
+    if score >= 85:
+        return "CRITICAL"
+    if score >= 65:
+        return "HIGH"
+    if score >= 40:
+        return "MEDIUM"
+    if score >= 10:
+        return "LOW"
+    return "NONE"
+
+
+class SeverityResult(tuple):
+    score: int
+    band: str
+    types: list[str]
+    ranked_entities: list[RankedEntity]
+
+    def __new__(
+        cls,
+        score: int,
+        band: str,
+        types: list[str],
+        ranked_entities: list[RankedEntity] | None = None,
+    ):
+        instance = super().__new__(cls, (score, band, types))
+        instance.score = score
+        instance.band = band
+        instance.types = types
+        instance.ranked_entities = ranked_entities or []
+        return instance
+
+
+def rank_entities(entities: list[Entity]) -> list[RankedEntity]:
+    if not entities:
+        return []
+
+    types = {e.type for e in entities}
+    # Group entities by (type, value) to calculate frequency and find highest risk exposure context
+    groups: dict[tuple[str, str], list[Entity]] = {}
+    for e in entities:
+        key = (e.type, e.value)
+        groups.setdefault(key, []).append(e)
+
+    ranked: list[RankedEntity] = []
+    for (typ, val), items in groups.items():
+        occ = len(items)
+        # pick highest exposure context layer
+        best_layer = "visible"
+        best_c = 0.0
+        for it in items:
+            c = _calc_exposure_context(it.layer)
+            if c > best_c:
+                best_c = c
+                best_layer = it.layer
+
+        s = INTRINSIC_SENSITIVITY.get(typ, 25.0)
+        e = EXPLOITABILITY.get(typ, 20.0)
+        l = _calc_linkability(typ, types)
+        c = best_c
+        f = _calc_frequency(occ)
+
+        # Contextual boosts for critical combinations
+        if typ == "IN_PAN" and "PERSON" in types and "DATE_TIME" in types:
+            s = max(s, 90.0)
+            e = max(e, 95.0)
+            l = 100.0
+        elif typ == "IN_BANK_ACCOUNT" and "IN_IFSC" in types:
+            e = max(e, 95.0)
+            l = max(l, 95.0)
+        elif typ == "CREDIT_CARD" and "PERSON" in types:
+            s = max(s, 98.0)
+            e = max(e, 95.0)
+            l = max(l, 95.0)
+
+        raw_score = (
+            WEIGHT_SENSITIVITY * s
+            + WEIGHT_EXPLOITABILITY * e
+            + WEIGHT_LINKABILITY * l
+            + WEIGHT_CONTEXT * c
+            + WEIGHT_FREQUENCY * f
+        )
+        final_score = round(raw_score, 2)
+        band = _get_band(final_score)
+
+        factors = SeverityFactors(
+            intrinsic_sensitivity=s,
+            exploitability=e,
+            linkability=l,
+            exposure_context=c,
+            frequency=f,
+        )
+        ranked.append(
+            RankedEntity(
+                rank=1,  # will be assigned after sorting
+                entity_type=typ,
+                value=val,
+                masked_value=mask_value(val, typ),
+                severity_score=final_score,
+                band=band,
+                factors=factors,
+                occurrences=occ,
+                layer=best_layer,
+            )
+        )
+
+    # Sort descending by severity score, then sensitivity, then exploitability
+    ranked.sort(
+        key=lambda r: (
+            -r.severity_score,
+            -r.factors.intrinsic_sensitivity,
+            -r.factors.exploitability,
+            r.entity_type,
+        )
+    )
+    for idx, r in enumerate(ranked, 1):
+        r.rank = idx
+
+    return ranked
+
+
+def severity(entities: list[Entity]) -> SeverityResult:
     types = {e.type for e in entities}
     if not types:
-        return 0, "NONE", []
+        return SeverityResult(0, "NONE", [], [])
 
-    score = 0
-    if "PERSON" in types:
-        score = max(score, 25)
-    if "LOCATION" in types:
-        score = max(score, 25)
-    if "IN_GSTIN" in types:
-        score = max(score, 50)
-    if "MOBILE_IN" in types:
-        score = max(score, 50)
-    if "EMAIL_ADDRESS" in types:
-        score = max(score, 50)
-    if "IN_UPI" in types:
-        score = max(score, 75)
-    if "IN_PASSPORT" in types:
-        score = max(score, 75)
-    if "IN_PAN" in types:
-        score = max(score, 75)
-    if "MOBILE_IN" in types and "PERSON" in types:
-        score = max(score, 75)
-    if "IN_PAN" in types and "PERSON" in types and "DATE_TIME" in types:
-        score = max(score, 95)
-    if "IN_BANK_ACCOUNT" in types and "IN_IFSC" in types:
-        score = max(score, 95)
-    if "CREDIT_CARD" in types:
-        score = max(score, 95)
-    if "IN_AADHAAR" in types:
-        score = max(score, 95)
+    ranked = rank_entities(entities)
+    top_score = max(r.severity_score for r in ranked) if ranked else 0.0
 
-    if score >= 85:
-        band = "CRITICAL"
-    elif score >= 65:
-        band = "HIGH"
-    elif score >= 40:
-        band = "MEDIUM"
-    elif score >= 10:
-        band = "LOW"
-    else:
-        band = "NONE"
-    return score, band, sorted(types)
+    # Ensure document score reflects compounding critical combinations
+    doc_score = int(round(top_score))
+    if any(
+        (
+            "IN_AADHAAR" in types,
+            "CREDIT_CARD" in types,
+            ("IN_BANK_ACCOUNT" in types and "IN_IFSC" in types),
+            ("IN_PAN" in types and "PERSON" in types and "DATE_TIME" in types),
+        )
+    ):
+        doc_score = max(doc_score, 85)
+    elif any(
+        (
+            ("MOBILE_IN" in types and "PERSON" in types),
+            "IN_PAN" in types,
+            "IN_PASSPORT" in types,
+            "IN_UPI" in types,
+        )
+    ):
+        doc_score = max(doc_score, 65)
+    elif any(("MOBILE_IN" in types, "EMAIL_ADDRESS" in types, "IN_GSTIN" in types)):
+        doc_score = max(doc_score, 50)
+    elif any(("PERSON" in types, "LOCATION" in types)):
+        doc_score = max(doc_score, 25)
 
+    band = _get_band(doc_score)
+    return SeverityResult(doc_score, band, sorted(types), ranked)

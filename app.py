@@ -107,6 +107,28 @@ with tabs[1]:
                 st.status(f"🤖 Agent: {ev['agent']}", state="complete")
             elif ev["kind"] == "detect":
                 st.write(f"**Detected:** {ev['counts']}  — severity **{ev['severity']}** (score {ev['score']})")
+                if ev.get("ranked_entities"):
+                    with st.expander("📊 Prioritized Privacy Severity Ranking (5-Factor Metric)", expanded=True):
+                        st.caption("Weighted Model: Sensitivity (30%) + Exploitability (20%) + Linkability (25%) + Exposure Context (15%) + Frequency (10%)")
+                        rank_rows = []
+                        for r in ev["ranked_entities"]:
+                            f = r.get("factors", {})
+                            band_badge = {"CRITICAL": "🔴 CRITICAL", "HIGH": "🟠 HIGH", "MEDIUM": "🟡 MEDIUM", "LOW": "🟢 LOW"}.get(r["band"], r["band"])
+                            rank_rows.append({
+                                "Rank": f"#{r['rank']}",
+                                "Type": r["entity_type"],
+                                "Masked Target": r["masked_value"],
+                                "Severity Score": f"{r['severity_score']:.1f}",
+                                "Band": band_badge,
+                                "Sensitivity (30%)": f"{f.get('intrinsic_sensitivity', 0):.0f}",
+                                "Exploitability (20%)": f"{f.get('exploitability', 0):.0f}",
+                                "Linkability (25%)": f"{f.get('linkability', 0):.0f}",
+                                "Context (15%)": f"{f.get('exposure_context', 0):.0f}",
+                                "Frequency (10%)": f"{f.get('frequency', 0):.0f}",
+                                "Occurrences": r.get("occurrences", 1),
+                                "Layer": r.get("layer", "visible"),
+                            })
+                        st.dataframe(rank_rows, use_container_width=True)
             elif ev["kind"] == "deliberation":
                 with st.expander("🗣️ Live Multi-Persona Deliberation & Dialectic Swarm", expanded=True):
                     for log in ev["logs"]:
@@ -135,6 +157,28 @@ with tabs[2]:
         else:
             st.error("❌ FAILED — the output still leaks. Download and inspect manually.")
         st.json({"input_sha256": report["input_sha256"], "output_sha256": report["output_sha256"]})
+
+        if report.get("ranked_entities"):
+            st.markdown("### 🏆 Ranked Entity Severity Assessment (5 Factors)")
+            st.caption("Ordered by multi-metric exposure risk: Sensitivity (30%) + Exploitability (20%) + Linkability (25%) + Context (15%) + Frequency (10%)")
+            rank_rows = []
+            for r in report["ranked_entities"]:
+                f = r.get("factors", {})
+                band_badge = {"CRITICAL": "🔴 CRITICAL", "HIGH": "🟠 HIGH", "MEDIUM": "🟡 MEDIUM", "LOW": "🟢 LOW"}.get(r["band"], r["band"])
+                rank_rows.append({
+                    "Rank": f"#{r['rank']}",
+                    "Type": r["entity_type"],
+                    "Masked Value": r["masked_value"],
+                    "Severity Score": f"{r['severity_score']:.1f}",
+                    "Band": band_badge,
+                    "Sensitivity": f"{f.get('intrinsic_sensitivity', 0):.0f}",
+                    "Exploitability": f"{f.get('exploitability', 0):.0f}",
+                    "Linkability": f"{f.get('linkability', 0):.0f}",
+                    "Context": f"{f.get('exposure_context', 0):.0f}",
+                    "Frequency": f"{f.get('frequency', 0):.0f}",
+                    "Count": r.get("occurrences", 1),
+                })
+            st.dataframe(rank_rows, use_container_width=True)
     else:
         st.info("Run Shield first (Agent Swarm tab).")
 
