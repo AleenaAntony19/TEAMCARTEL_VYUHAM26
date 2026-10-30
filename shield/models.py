@@ -62,3 +62,24 @@ class FetchResult:
     blocked_reason: str | None = None
     error: str | None = None
 
+
+@dataclass
+class SeverityFactors:
+    intrinsic_sensitivity: float  # 30%
+    exploitability: float         # 20%
+    linkability: float            # 25%
+    exposure_context: float       # 15%
+    frequency: float              # 10%
+
+
+@dataclass
+class RankedEntity:
+    rank: int
+    entity_type: str
+    value: str
+    masked_value: str
+    severity_score: float
+    band: str
+    factors: SeverityFactors
+    occurrences: int = 1
+    layer: str = "visible"
