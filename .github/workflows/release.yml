@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag like v0.4.0 (must equal vscode/package.json "version").
+# Push a tag like v0.5.0 (must equal vscode/package.json "version").
 on:
   push:
     tags: ["v*"]
@@ -98,7 +98,7 @@ jobs:
             --title "Shield·Code $GITHUB_REF_NAME"
 
   publish:
-    # Runs only when store tokens are configured (repo Settings > Secrets > Actions).
+    # Runs only when store tokens are configured (repo Settings > Secrets > Actions: OVSX_PAT, VSCE_PAT).
     needs: release
     runs-on: ubuntu-latest
     env:
@@ -114,7 +114,15 @@ jobs:
           node-version: "22"
       - name: Open VSX (Antigravity, Cursor, VSCodium)
         if: env.OVSX_PAT != ''
-        run: for f in *.vsix; do npx --yes ovsx@0.10.6 publish "$f" -p "$OVSX_PAT"; done
+        # each target is its own upload; a rerun skips the ones already published
+        run: |
+          set -e
+          for f in *.vsix; do npx --yes ovsx@0.10.6 publish "$f" -p "$OVSX_PAT" --skip-duplicate; done
+      - name: Check the listing
+        if: env.OVSX_PAT != ''
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          curl -fsS "https://open-vsx.org/api/aaron43210/shield-code/$version" | jq -e --arg v "$version" '.version == $v'
       - name: VS Code Marketplace
         if: env.VSCE_PAT != ''
         run: for f in *.vsix; do npx --yes @vscode/vsce@4.0.0 publish --packagePath "$f" -p "$VSCE_PAT"; done

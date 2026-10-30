@@ -90,7 +90,7 @@ function html(nonce: string, csp: string): string {
 </div>
 <button id="save">Save</button><button id="test" class="sec">Test</button><button id="forget" class="sec">Forget key</button>
 <p id="st" role="status"></p>
-<p class="muted">Used only for “Explain with AI”. Sent: rule, engine, severity and masked evidence; never file contents or raw values. Keys live in VS Code Secret Storage. Rotate any key that was ever pasted into chat or committed.</p>
+<p class="muted">“Explain with AI” sends rule, engine, severity and masked evidence only. “AI Deep Scan” asks first, then sends file text. Keys live in VS Code Secret Storage. Rotate any key that was ever pasted into chat or committed.</p>
 <script nonce="${nonce}">
  const vs=acquireVsCodeApi(); const $=id=>document.getElementById(id); let keys={};
  const sync=()=>{const p=$('p').value;$('cfg').style.display=p==='none'?'none':'block';$('ks').textContent=p!=='none'&&keys[p]?'(stored)':'(not set)';$('forget').disabled=p==='none'||!keys[p]};

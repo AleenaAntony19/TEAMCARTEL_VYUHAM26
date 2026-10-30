@@ -1,10 +1,33 @@
 {
   "name": "shield-code",
-  "displayName": "Shield·Code",
+  "displayName": "Shield\u00b7Code",
   "description": "Scan a workspace for secrets, Indian PII, unsafe code, risky config and sensitive images/documents; review and apply safe fixes with a preview.",
   "version": "0.5.0",
-  "publisher": "shield-scout",
+  "publisher": "aaron43210",
   "license": "UNLICENSED",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AleenaAntony19/TEAMCARTEL_VYUHAM26.git",
+    "directory": "vscode"
+  },
+  "homepage": "https://github.com/AleenaAntony19/TEAMCARTEL_VYUHAM26/tree/main/vscode#readme",
+  "bugs": {
+    "url": "https://github.com/AleenaAntony19/TEAMCARTEL_VYUHAM26/issues"
+  },
+  "keywords": [
+    "security",
+    "secrets",
+    "privacy",
+    "pii",
+    "aadhaar",
+    "redaction",
+    "sast"
+  ],
+  "galleryBanner": {
+    "color": "#17191B",
+    "theme": "dark"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -58,14 +81,14 @@
       },
       {
         "command": "shieldCode.pickFix",
-        "title": "Fix…"
+        "title": "Fix\u2026"
       }
     ],
     "viewsContainers": {
       "activitybar": [
         {
           "id": "shieldCode",
-          "title": "Shield·Code",
+          "title": "Shield\u00b7Code",
           "icon": "$(shield)"
         }
       ]
@@ -130,7 +153,7 @@
       ]
     },
     "configuration": {
-      "title": "Shield·Code",
+      "title": "Shield\u00b7Code",
       "properties": {
         "shieldCode.pythonPath": {
           "type": "string",

@@ -1,11 +1,46 @@
-# Shield·Code (VS Code)
+# Shield·Code
 
-Scans the open workspace with the local Shield·Scout engine and shows findings in **Problems** (inline diagnostics) and the **Shield·Code → Findings** view.
+Find secrets, Indian PII, unsafe code, risky config and sensitive images or documents in your workspace. Review every fix before it is applied. Detection runs on your machine.
+
+![Findings tree and quick fixes in VS Code](media/quick_fix.png)
+
+## What it finds
+
+| Engine | Examples |
+|---|---|
+| Secrets | API keys and tokens, in code and in git history |
+| PII | Aadhaar (Verhoeff checked), PAN, UPI, bank accounts, phone, email, voter ID |
+| Code | Unsafe calls found by Bandit, such as `yaml.load` or `verify=False` |
+| Config | Tracked `.env` files, missing `.gitignore` rules |
+| Images and documents | Keys and IDs visible in screenshots (OCR), faces, EXIF GPS, every layer of PDF, DOCX and XLSX |
+
+Values are masked in every view. A value that is labelled as an ID but fails its checks is still reported, as unverified.
+
+## Review, then apply
+
+Every fix opens a preview and changes nothing until you press **Apply**. Redacting an image replaces the text with an opaque fill, strips metadata, and keeps the original in `.shield/backup/`.
+
+![Fix preview dialog](media/fix_preview_dialog.png)
+
+Right-click a finding for **Fix…** and **Why flagged**.
+
+![Why flagged log](media/why_flagged.png)
+
+## Optional AI (Groq or Claude)
+
+Bring your own key in the **AI Provider** panel. Keys stay in VS Code Secret Storage.
+
+![AI Provider panel connected](media/ai_provider.png)
+
+**Shield: AI Deep Scan** (✨) finds what no rule covers, such as a diagnosis or a home address. It asks every time, and it is the one feature that sends file text out of your machine:
+
+![Deep scan consent dialog](media/deep_scan_consent.png)
+
+AI results are opinions, not verified matches. They can miss things, so they only add to the rule-based findings.
 
 ## Install (no Python needed)
-Download the build for your OS from the GitHub Release (`shield-code-win32-x64.vsix`, `-darwin-arm64`, `-linux-x64`) and run **Extensions: Install from VSIX…**. The build bundles the scanner engine, so nobody needs Python. OCR needs Tesseract: the Windows build includes it; on macOS/Linux install it (`brew install tesseract` / `apt install tesseract-ocr`), or OCR is reported as unavailable while everything else works.
+Search **Shield·Code** in the Extensions view of VSCodium, Cursor or Antigravity (Open VSX), or get the build for your OS from the [GitHub Releases](https://github.com/AleenaAntony19/TEAMCARTEL_VYUHAM26/releases) and run **Extensions: Install from VSIX…**. The build bundles the scanner engine, so nobody needs Python. OCR needs Tesseract: the Windows build includes it; on macOS/Linux install it (`brew install tesseract` / `apt install tesseract-ocr`), or OCR is reported as unavailable while everything else works.
 
-Antigravity, Cursor and VSCodium install from Open VSX; VS Code installs from the Marketplace (once the publisher tokens are set; see the main README).
 
 **Developers** (no bundled engine): set `shieldCode.pythonPath` to a Python 3.11 with `requirements.txt`, and `shieldCode.enginePath` to the `shield_scout` folder. On Windows, leaving `pythonPath` empty uses the `py -3` launcher.
 

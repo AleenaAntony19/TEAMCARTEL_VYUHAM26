@@ -296,7 +296,7 @@ def test_connection(cfg: LLMConfig, transport: httpx.BaseTransport | None = None
                         models_info = f" Available models for your key: {', '.join(avail)}"
             except Exception:
                 pass
-        return {"ok": False, "provider": cfg.provider, "model": cfg.model, "error": f"{exc}.{models_info}"}
+        return {"ok": False, "provider": cfg.provider, "model": cfg.model, "error": f"{exc}{models_info}"}
 
 
 ALLOWED_FIELDS = ("type", "rule", "engine", "analyzer", "severity", "confidence", "layer", "masked", "message")

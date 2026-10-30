@@ -15,7 +15,7 @@ async function until(fn, ms = 120000) {
 
 exports.run = async () => {
   const ws = vscode.workspace.workspaceFolders[0].uri.fsPath;
-  const ext = vscode.extensions.getExtension("shield-scout.shield-code");
+  const ext = vscode.extensions.getExtension("aaron43210.shield-code");
   assert.ok(ext, "extension installed");
   const api = await ext.activate();
   const fs = require("node:fs");
@@ -31,7 +31,8 @@ exports.run = async () => {
   assert.ok(!secret.message.includes(process.env.SHIELD_TEST_KEY), "diagnostic must not show the raw key");
 
   const doc = await vscode.workspace.openTextDocument(cfg);
-  const actions = await vscode.commands.executeCommand("vscode.executeCodeActionProvider", doc.uri, secret.range);
+  // filtered like the lightbulb menu: an action of any other kind would not be on screen
+  const actions = await vscode.commands.executeCommand("vscode.executeCodeActionProvider", doc.uri, secret.range, vscode.CodeActionKind.QuickFix.value);
   const titles = actions.map((a) => a.title);
   assert.ok(titles.some((t) => t.includes("Move secret to .env")), `quick fix offered: ${titles}`);
 

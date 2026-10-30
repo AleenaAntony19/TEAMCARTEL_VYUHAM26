@@ -364,10 +364,10 @@ export function activate(ctx: vscode.ExtensionContext): { lastError: () => strin
             a.command = { command: "shieldCode.previewFix", title: "Preview fix", arguments: [folder.uri.fsPath, f, kind] };
             actions.push(a);
           }
-          const why = new vscode.CodeAction("Shield: Why flagged", vscode.CodeActionKind.Empty);
+          const why = new vscode.CodeAction("Shield: Why flagged", vscode.CodeActionKind.QuickFix); // an empty kind is hidden from the Quick Fix menu
           why.command = { command: "shieldCode.whyFlagged", title: "Why flagged", arguments: [{ finding: { f } }] };
           actions.push(why);
-          const ex = new vscode.CodeAction("Shield: Explain with AI (masked data only)", vscode.CodeActionKind.Empty);
+          const ex = new vscode.CodeAction("Shield: Explain with AI (masked data only)", vscode.CodeActionKind.QuickFix);
           ex.command = { command: "shieldCode.explainFinding", title: "Explain", arguments: [f] };
           actions.push(ex);
         }
