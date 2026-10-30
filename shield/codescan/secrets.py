@@ -68,6 +68,8 @@ def scan_secrets(files: list[Path], root: Path) -> list[Finding]:
                         hits.append((rule, i, m.start(), m.end(), m.group(0), 0.95))
         try:
             for rule, i, value in _detect_secrets(path):
+                if value and is_doc_example(value):
+                    continue
                 line = lines[i - 1] if 0 < i <= len(lines) else ""
                 col = line.find(value) if value else -1
                 if any(h[1] == i and (col < 0 or h[2] <= col < h[3]) for h in hits):
