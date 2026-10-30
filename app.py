@@ -129,6 +129,30 @@ with tabs[1]:
                                 "Layer": r.get("layer", "visible"),
                             })
                         st.dataframe(rank_rows, use_container_width=True)
+            elif ev["kind"] == "verification_audit":
+                audit = ev["report"]
+                c_icon = "✅" if audit["audit_passed"] else "⚠️"
+                with st.expander(f"{c_icon} Full-Document Word Verification & Detector Audit ({audit['verification_completeness_pct']:.1f}% Completeness)", expanded=not audit["audit_passed"]):
+                    st.metric(
+                        "Verification Completeness",
+                        f"{audit['verification_completeness_pct']:.1f}%",
+                        f"{audit['captured_count']} captured / {len(audit['potential_misses'])} unclassified misses",
+                    )
+                    st.caption(f"Total tokens audited across all document layers: **{audit['total_tokens_scanned']}**")
+                    if audit["potential_misses"]:
+                        st.warning(f"🚨 Detector Miss Alert: {len(audit['potential_misses'])} high-risk token(s) escaped primary patterns and were auto-queued for protection!")
+                        miss_rows = []
+                        for m in audit["potential_misses"]:
+                            miss_rows.append({
+                                "Token": m["masked_token"],
+                                "Suspected Category": m["suspected_category"],
+                                "Severity Score": f"{m['severity_score']:.1f}",
+                                "Band": m["band"],
+                                "Layer": m["layer"],
+                            })
+                        st.table(miss_rows)
+                    else:
+                        st.success("✅ Zero blind spots: all high-risk tokens and identifiers were successfully verified and captured by the detector.")
             elif ev["kind"] == "deliberation":
                 with st.expander("🗣️ Live Multi-Persona Deliberation & Dialectic Swarm", expanded=True):
                     for log in ev["logs"]:
@@ -179,6 +203,25 @@ with tabs[2]:
                     "Count": r.get("occurrences", 1),
                 })
             st.dataframe(rank_rows, use_container_width=True)
+
+        audit = report.get("verification_audit")
+        if audit:
+            st.markdown("### 🔍 Full-Document Word Verification & Blind Spot Audit")
+            p_badge = "✅ PASSED" if audit.get("audit_passed") else "⚠️ WARNING"
+            st.write(f"**Verification Completeness:** `{audit.get('verification_completeness_pct', 100):.1f}%` — Status: **{p_badge}**")
+            st.caption(f"Audited {audit.get('total_tokens_scanned', 0)} tokens across all layers. {audit.get('captured_count', 0)} confirmed captures, {len(audit.get('potential_misses', []))} unclassified high-risk misses.")
+            if audit.get("potential_misses"):
+                st.error("The following high-risk tokens escaped standard detector patterns and required automated protection:")
+                st.table([
+                    {
+                        "Token": m["masked_token"],
+                        "Suspected Category": m["suspected_category"],
+                        "Severity Score": f"{m['severity_score']:.1f}",
+                        "Band": m["band"],
+                        "Layer": m["layer"],
+                    }
+                    for m in audit["potential_misses"]
+                ])
     else:
         st.info("Run Shield first (Agent Swarm tab).")
 

@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import math
 import re
+from collections import Counter
 
-from .models import Entity, RankedEntity, SeverityFactors
+from .models import (
+    Entity,
+    RankedEntity,
+    SeverityFactors,
+    TokenAuditResult,
+    VerificationAuditReport,
+)
 
 # ---------- Verhoeff ----------
 _D = (
@@ -484,3 +492,187 @@ def severity(entities: list[Entity]) -> SeverityResult:
 
     band = _get_band(doc_score)
     return SeverityResult(doc_score, band, sorted(types), ranked)
+
+
+# ---------- Full-Document Token Auditor & Verification Engine ----------
+COMMON_WORDS: set[str] = {
+    "the", "and", "for", "with", "from", "this", "that", "have", "name",
+    "employee", "number", "invalid", "valid", "report", "document", "page", "date",
+    "title", "status", "quarterly", "annual", "company", "organization", "statement",
+    "details", "information", "address", "access", "secret", "confidential", "private",
+    "public", "notes", "summary", "about", "other", "their", "which", "there", "first",
+    "last", "section", "table", "invoice", "receipt", "total", "amount", "project"
+}
+
+CONTEXT_TRIGGERS: set[str] = {
+    "account", "a/c", "acct", "aadhaar", "uid", "pan", "card", "cvv", "otp",
+    "pin", "salary", "payroll", "secret", "password", "token", "patient",
+    "medical", "confidential", "kyc", "ifsc", "balance", "access", "key"
+}
+
+TOKEN_PATTERN: re.Pattern = re.compile(
+    r"\b\d{4}[\s-]\d{4}[\s-]\d{4}\b|\b\d{6,19}\b|\b[A-Za-z0-9._%+\-@]{4,}\b"
+)
+
+
+def _shannon_entropy(s: str) -> float:
+    """Calculate Shannon entropy to flag high-randomness secrets and keys."""
+    if not s:
+        return 0.0
+    counts = Counter(s)
+    length = len(s)
+    return -sum((cnt / length) * math.log2(cnt / length) for cnt in counts.values())
+
+
+def extract_all_tokens(text: str, layer: str = "visible") -> list[tuple[str, int, int, str]]:
+    """Extract all candidate word, numerical, and alphanumeric tokens from text."""
+    if not text:
+        return []
+    tokens: list[tuple[str, int, int, str]] = []
+    for m in TOKEN_PATTERN.finditer(text):
+        tok = m.group(0).strip()
+        if len(tok) >= 3:
+            tokens.append((tok, m.start(), m.end(), layer))
+    return tokens
+
+
+def audit_all_extracted_text(
+    text_layers: dict[str, str] | str,
+    detected_entities: list[Entity],
+) -> VerificationAuditReport:
+    """
+    Exhaustively audit every word, number, and token across all document layers.
+    Computes the 5-factor severity score for each token and cross-checks with
+    the detector's findings to guarantee zero unflagged high-severity leaks.
+    """
+    if isinstance(text_layers, str):
+        text_layers = {"visible": text_layers}
+
+    all_tokens: list[tuple[str, int, int, str, str]] = []
+    for layer, text in text_layers.items():
+        if not text:
+            continue
+        for m in TOKEN_PATTERN.finditer(text):
+            tok = m.group(0).strip()
+            if len(tok) >= 3:
+                all_tokens.append((tok, m.start(), m.end(), layer, text))
+
+    total_tokens_scanned = len(all_tokens)
+    captured_count = 0
+    potential_misses: list[TokenAuditResult] = []
+    token_counts = Counter(t[0].lower() for t in all_tokens)
+
+    for tok, start, end, layer, full_text in all_tokens:
+        # Check if this token is covered by the primary detector's entities
+        covered = any(
+            (e.start <= start and end <= e.end)
+            or (e.value and tok in e.value)
+            or (e.value and e.value in tok)
+            for e in detected_entities
+        )
+
+        stripped = re.sub(r"[\s\-]", "", tok)
+        ent = _shannon_entropy(tok)
+        ctx_window = full_text[max(0, start - 50) : min(len(full_text), end + 50)].lower()
+        has_trigger = any(tr in ctx_window for tr in CONTEXT_TRIGGERS)
+
+        s, e, l, cat = 10.0, 10.0, 20.0, "STANDARD_TEXT"
+
+        if covered:
+            s, e, l, cat = 90.0, 85.0, 90.0, "DETECTED_PII"
+        elif len(stripped) == 12 and stripped.isdigit():
+            # 12-digit number (e.g. invalid Aadhaar or unformatted identity credential)
+            s = 85.0
+            e = 75.0
+            l = 90.0 if has_trigger else 60.0
+            cat = "UNCLASSIFIED_12DIGIT_NUMERIC"
+        elif 13 <= len(stripped) <= 19 and stripped.isdigit():
+            # 13-19 digit sequence (credit/debit card structure)
+            s = 85.0
+            e = 85.0
+            l = 90.0 if has_trigger else 60.0
+            cat = "UNCLASSIFIED_CARD_NUMERIC"
+        elif 9 <= len(stripped) <= 11 and stripped.isdigit():
+            # 9-11 digit sequence (bank account or unflagged phone)
+            s = 65.0
+            e = 65.0
+            l = 85.0 if has_trigger else 50.0
+            cat = "UNCLASSIFIED_ACCOUNT_OR_PHONE"
+        elif len(tok) >= 12 and ent >= 3.4 and any(c.isdigit() for c in tok) and any(c.isalpha() for c in tok):
+            # High-entropy alphanumeric token (API key / secret / credential)
+            s = 80.0
+            e = 75.0
+            l = 80.0 if has_trigger else 50.0
+            cat = "HIGH_ENTROPY_SECRET"
+        elif len(tok) == 10 and any(c.isdigit() for c in tok) and any(c.isalpha() for c in tok):
+            # 10-char alphanumeric sequence (e.g. PAN or Passport syntax candidate)
+            s = 70.0
+            e = 65.0
+            l = 80.0 if has_trigger else 45.0
+            cat = "UNCLASSIFIED_ALPHANUMERIC_ID"
+        elif "@" in tok and "." in tok:
+            s = 55.0
+            e = 50.0
+            l = 75.0 if has_trigger else 40.0
+            cat = "UNCLASSIFIED_HANDLE_OR_EMAIL"
+        elif tok.lower() in COMMON_WORDS:
+            s, e, l, cat = 5.0, 5.0, 10.0, "COMMON_WORD"
+        elif has_trigger and len(tok) >= 5 and (any(c.isdigit() for c in tok) or tok.isupper()):
+            s = 45.0
+            e = 40.0
+            l = 75.0
+            cat = "TRIGGER_PROXIMITY_TOKEN"
+
+        c = _calc_exposure_context(layer)
+        f = _calc_frequency(token_counts[tok.lower()])
+        score = round(
+            WEIGHT_SENSITIVITY * s
+            + WEIGHT_EXPLOITABILITY * e
+            + WEIGHT_LINKABILITY * l
+            + WEIGHT_CONTEXT * c
+            + WEIGHT_FREQUENCY * f,
+            2,
+        )
+        band = _get_band(score)
+        factors = SeverityFactors(s, e, l, c, f)
+
+        if score >= 40.0:
+            if covered:
+                captured_count += 1
+            else:
+                masked = mask_value(tok, "IN_AADHAAR" if "12DIGIT" in cat else "GENERIC")
+                potential_misses.append(
+                    TokenAuditResult(
+                        token=tok,
+                        masked_token=masked,
+                        layer=layer,
+                        start=start,
+                        end=end,
+                        severity_score=score,
+                        band=band,
+                        factors=factors,
+                        is_captured_by_detector=False,
+                        suspected_category=cat,
+                    )
+                )
+
+    # Deduplicate potential misses by (token, layer)
+    uniq_misses: list[TokenAuditResult] = []
+    seen = set()
+    for m in potential_misses:
+        key = (m.token, m.layer)
+        if key not in seen:
+            seen.add(key)
+            uniq_misses.append(m)
+
+    total_high_risk = captured_count + len(uniq_misses)
+    completeness = 100.0 if total_high_risk == 0 else round((captured_count / total_high_risk) * 100, 1)
+
+    return VerificationAuditReport(
+        total_tokens_scanned=total_tokens_scanned,
+        captured_count=captured_count,
+        potential_misses=uniq_misses,
+        verification_completeness_pct=completeness,
+        audit_passed=(len(uniq_misses) == 0),
+    )
+

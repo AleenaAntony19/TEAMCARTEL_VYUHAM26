@@ -5,7 +5,10 @@ import re
 import zipfile
 from pathlib import Path
 
-from lxml import etree
+try:
+    from lxml import etree
+except ImportError:
+    import xml.etree.ElementTree as etree
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 DC = "{http://purl.org/dc/elements/1.1/}"
