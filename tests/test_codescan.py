@@ -157,3 +157,11 @@ def test_fake_pii_value_is_not_reflagged(repo):
     pii = next(f for f in res["findings"] if f["rule"] == "IN_AADHAAR")
     apply_plan(plan_fix(r, pii, "fake_pii"), r)
     assert not [f for f in scan(r, engines=["pii"], ocr=False)["findings"] if f["rule"] == "IN_AADHAAR" and f["file"] == "tests/users.json"]
+
+
+def test_sast_evidence_never_carries_a_neighbouring_secret(tmp_path):
+    key = "sk-proj-" + _rand(48)
+    (tmp_path / "c.py").write_text(f'import yaml\nKEY = "{key}"\nyaml.load(open("x"), Loader=yaml.Loader)\n')
+    res = scan(tmp_path, engines=["sast", "secrets"], ocr=False)
+    assert any(f["rule"] == "B506" and "yaml.load" in f["evidence"] for f in res["findings"])
+    assert key not in json.dumps(res)

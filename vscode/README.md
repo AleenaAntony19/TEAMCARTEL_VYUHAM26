@@ -2,12 +2,12 @@
 
 Scans the open workspace with the local Shield·Scout engine and shows findings in **Problems** (inline diagnostics) and the **Shield·Code → Findings** view.
 
-## Setup
-1. A Python 3.11 env with `shield_scout/requirements.txt` installed, plus `tesseract` for OCR.
-2. Settings:
-   - `shieldCode.pythonPath`: that interpreter, e.g. `/Users/aaronr/py311/bin/python`
-   - `shieldCode.enginePath`: the `shield_scout` folder (it is added to `PYTHONPATH`)
-3. Install: `cd vscode && npm ci && npm run package` → in VS Code run **Extensions: Install from VSIX…** and pick `shield-code-0.2.0.vsix`.
+## Install (no Python needed)
+Download the build for your OS from the GitHub Release (`shield-code-win32-x64.vsix`, `-darwin-arm64`, `-linux-x64`) and run **Extensions: Install from VSIX…**. The build bundles the scanner engine, so nobody needs Python. OCR needs Tesseract: the Windows build includes it; on macOS/Linux install it (`brew install tesseract` / `apt install tesseract-ocr`), or OCR is reported as unavailable while everything else works.
+
+Antigravity, Cursor and VSCodium install from Open VSX; VS Code installs from the Marketplace (once the publisher tokens are set; see the main README).
+
+**Developers** (no bundled engine): set `shieldCode.pythonPath` to a Python 3.11 with `requirements.txt`, and `shieldCode.enginePath` to the `shield_scout` folder. On Windows, leaving `pythonPath` empty uses the `py -3` launcher.
 
 ## Use
 - **Shield: Scan Workspace** (also the shield icon in the view title, or the status bar). Shows progress and can be cancelled; files are found dynamically (git-tracked + untracked-not-ignored, or a directory walk), honouring `shieldCode.exclude`, size limits and always-skipped folders (`node_modules`, `.git`, venvs, `dist`…).

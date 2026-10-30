@@ -4,7 +4,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
-source "${SHIELD_VENV:-/Users/aaronr/py311}/bin/activate"
+# local dev: activate a venv if SHIELD_VENV points at one; CI already has the right python on PATH
+if [ -n "${SHIELD_VENV:-}" ] && [ -f "$SHIELD_VENV/bin/activate" ]; then source "$SHIELD_VENV/bin/activate"; fi
 export PYTHONPATH="$ROOT_DIR" SHIELD_ALLOW_LOCAL=1
 
 echo "==> fixtures + mock web"

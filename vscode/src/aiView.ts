@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
+import { RETIRED_MODELS } from "./core.ts";
 import { runPython } from "./runner.ts";
 
 type Provider = "none" | "groq" | "anthropic";
@@ -8,13 +9,20 @@ const DEFAULT_MODEL: Record<Exclude<Provider, "none">, string> = { groq: "openai
 const secretId = (p: string) => `shieldCode.llmKey.${p}`;
 
 /** Env for `python -m shield.llm`, with the key from VS Code Secret Storage; null when not configured. */
-export async function llmEnv(ctx: vscode.ExtensionContext): Promise<Record<string, string> | null> {
+/** Provider choice lives in extension storage (not settings.json, which a syntax error makes read-only). */
+function choice(ctx: vscode.ExtensionContext): { provider: Provider; model: string } {
   const cfg = vscode.workspace.getConfiguration("shieldCode");
-  const provider = (cfg.get<string>("llm.provider") ?? "none") as Provider;
+  const provider = ctx.globalState.get<Provider>("llm.provider") ?? (cfg.get<string>("llm.provider") as Provider) ?? "none";
+  const model = ctx.globalState.get<string>("llm.model") ?? cfg.get<string>("llm.model") ?? "";
+  return { provider, model: RETIRED_MODELS.has(model) ? "" : model };
+}
+
+export async function llmEnv(ctx: vscode.ExtensionContext): Promise<Record<string, string> | null> {
+  const { provider, model } = choice(ctx);
   if (provider === "none") return null;
   const key = await ctx.secrets.get(secretId(provider));
   if (!key) return null;
-  return { SHIELD_LLM_PROVIDER: provider, SHIELD_LLM_MODEL: cfg.get<string>("llm.model") || DEFAULT_MODEL[provider], [KEY_ENV[provider]]: key };
+  return { SHIELD_LLM_PROVIDER: provider, SHIELD_LLM_MODEL: model || DEFAULT_MODEL[provider], [KEY_ENV[provider]]: key };
 }
 
 // "AI Provider" sidebar panel: choose Groq or Claude, store the key in Secret Storage, test the connection.
@@ -28,10 +36,9 @@ export class AiViewProvider implements vscode.WebviewViewProvider {
     view.webview.html = html(nonce, view.webview.cspSource);
 
     const state = async () => {
-      const cfg = vscode.workspace.getConfiguration("shieldCode");
-      const provider = (cfg.get<string>("llm.provider") ?? "none") as Provider;
+      const { provider, model } = choice(this.ctx);
       const keys = { groq: !!(await this.ctx.secrets.get(secretId("groq"))), anthropic: !!(await this.ctx.secrets.get(secretId("anthropic"))) };
-      return { type: "state", provider, model: cfg.get<string>("llm.model") ?? "", keys };
+      return { type: "state", provider, model, keys };
     };
     const post = (m: unknown) => view.webview.postMessage(m);
 
@@ -39,9 +46,8 @@ export class AiViewProvider implements vscode.WebviewViewProvider {
       try {
         if (msg.type === "ready") return void post(await state());
         if (msg.type === "save" && msg.provider) {
-          const cfg = vscode.workspace.getConfiguration("shieldCode");
-          await cfg.update("llm.provider", msg.provider, vscode.ConfigurationTarget.Global);
-          await cfg.update("llm.model", msg.provider === "none" ? "" : (msg.model || DEFAULT_MODEL[msg.provider]), vscode.ConfigurationTarget.Global);
+          await this.ctx.globalState.update("llm.provider", msg.provider);
+          await this.ctx.globalState.update("llm.model", msg.provider === "none" || RETIRED_MODELS.has(msg.model ?? "") ? "" : (msg.model ?? ""));
           if (msg.provider !== "none" && msg.key?.trim()) await this.ctx.secrets.store(secretId(msg.provider), msg.key.trim());
           post(await state());
           return void post({ type: "status", ok: true, text: msg.provider === "none" ? "AI explanations disabled." : "Saved. The key is in VS Code Secret Storage." });

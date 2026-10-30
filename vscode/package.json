@@ -2,7 +2,7 @@
   "name": "shield-code",
   "displayName": "Shield·Code",
   "description": "Scan a workspace for secrets, Indian PII, unsafe code, risky config and sensitive images/documents; review and apply safe fixes with a preview.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "shield-scout",
   "license": "UNLICENSED",
   "engines": {
@@ -98,8 +98,8 @@
       "properties": {
         "shieldCode.pythonPath": {
           "type": "string",
-          "default": "python3",
-          "description": "Python interpreter that has the shield_scout requirements installed."
+          "default": "",
+          "description": "Leave empty to use the engine bundled in the platform build. Developers: a Python interpreter with shield_scout requirements (then set enginePath)."
         },
         "shieldCode.enginePath": {
           "type": "string",
@@ -183,7 +183,7 @@
             "anthropic"
           ],
           "default": "none",
-          "description": "Set from the AI Provider panel. Keys are stored in VS Code Secret Storage, never in settings."
+          "description": "Legacy: the AI Provider panel now stores this in extension storage. Keys are in Secret Storage, never in settings."
         },
         "shieldCode.llm.model": {
           "type": "string",

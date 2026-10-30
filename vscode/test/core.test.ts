@@ -39,3 +39,15 @@ test("debounce collapses bursts", async () => {
   await new Promise((r) => setTimeout(r, 50));
   assert.equal(n, 1);
 });
+
+import { explainStartFailure, resolveEngine } from "../src/core.ts";
+
+test("engine resolution: bundled binary, explicit python, Windows py launcher", () => {
+  const scan = ["-m", "shield.codescan", "scan", "/w"];
+  assert.deepEqual(resolveEngine(scan, { bundled: "/e/shield-engine", pythonPath: "", platform: "darwin" }), { command: "/e/shield-engine", args: ["scan", "/w"] });
+  assert.deepEqual(resolveEngine(["-m", "shield.mcp"], { bundled: "/e/x.exe", pythonPath: "", platform: "win32" }).args, ["mcp"]);
+  assert.deepEqual(resolveEngine(["-m", "shield.llm", "test"], { bundled: "/e/x", pythonPath: "", platform: "linux" }).args, ["llm", "test"]);
+  assert.deepEqual(resolveEngine(scan, { bundled: "/e/x", pythonPath: "/py", platform: "linux" }).command, "/py"); // explicit setting wins
+  assert.deepEqual(resolveEngine(scan, { bundled: null, pythonPath: "", platform: "win32" }), { command: "py", args: ["-3", ...scan] });
+  assert.match(explainStartFailure("Python was not found; run without arguments to install from the Microsoft Store", "win32"), /Windows build/);
+});

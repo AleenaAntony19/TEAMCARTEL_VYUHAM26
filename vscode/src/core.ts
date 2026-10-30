@@ -92,3 +92,33 @@ export function debounce<A extends unknown[]>(fn: (...a: A) => void, ms: number)
   let t: ReturnType<typeof setTimeout> | undefined;
   return (...a: A) => { if (t) clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
+
+/**
+ * How to start the engine. A bundled engine (platform VSIX) needs no Python; otherwise run the
+ * `shield` package with the configured interpreter (`py -3` on Windows: `python3`/`python` there is often
+ * only the Microsoft Store stub). `args` are always given in module form: ["-m", "shield.codescan", ...].
+ */
+export function resolveEngine(
+  args: string[], opts: { bundled: string | null; pythonPath: string; platform: string },
+): { command: string; args: string[] } {
+  if (opts.bundled && !opts.pythonPath) {
+    const [flag, mod, ...rest] = args;
+    if (flag !== "-m") return { command: opts.bundled, args };
+    const mode = mod === "shield.llm" ? ["llm"] : mod === "shield.mcp" ? ["mcp"] : [];
+    return { command: opts.bundled, args: [...mode, ...rest] };
+  }
+  if (opts.pythonPath) return { command: opts.pythonPath, args };
+  return opts.platform === "win32" ? { command: "py", args: ["-3", ...args] } : { command: "python3", args };
+}
+
+/** Turn "python not found" style failures into an actionable message. */
+export function explainStartFailure(message: string, platform: string): string {
+  if (/Microsoft Store|ENOENT|not found|not recognized/i.test(message)) {
+    return platform === "win32"
+      ? "Python was not found. Install the Windows build of Shield·Code (it bundles the engine), or install Python 3.11 and set shieldCode.pythonPath to python.exe."
+      : "Python was not found. Install the platform build of Shield·Code (bundled engine), or set shieldCode.pythonPath.";
+  }
+  return message;
+}
+
+export const RETIRED_MODELS = new Set(["llama-3.3-70b-versatile", "claude-3-7-sonnet", "claude-3-5-haiku"]);

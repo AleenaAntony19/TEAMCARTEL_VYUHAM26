@@ -18,3 +18,5 @@ demo/leak_bank.json
 .DS_Store
 Screenshot*.png
 .shield/
+vscode/engine/
+build/
