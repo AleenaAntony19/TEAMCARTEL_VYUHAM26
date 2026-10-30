@@ -77,11 +77,12 @@ def luhn_valid(s: str) -> bool:
 
 # ---------- patterns ----------
 PATTERNS: dict[str, re.Pattern] = {
-    "IN_AADHAAR": re.compile(r"\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b"),
+    "IN_AADHAAR": re.compile(r"\b[1-9]\d{3}[\s-]{0,3}\d{4}[\s-]{0,3}\d{4}\b"),
     "IN_PAN": re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b"),
     # GSTIN: state code + PAN + entity digit + 'Z' + check char (from origin/development, layout tightened)
     "IN_GSTIN": re.compile(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b"),
     "IN_PASSPORT": re.compile(r"\b[A-PR-WY][1-9]\d{6}\b"),
+    "IN_VOTER_ID": re.compile(r"\b(?:[A-Z]{3}[0-9]{7}|[A-Z]{2,3}/\d{2}/\d{3}/\d{6,7})\b"),
     "IN_UPI": re.compile(
         r"(?<![\w.])[\w.\-]{2,256}@(?:okaxis|oksbi|okicici|okhdfcbank|ybl|ibl|axl|paytm|upi|apl|axisbank|sbi|icici|hdfcbank)\b(?![\w.])",
         re.I,
@@ -115,9 +116,14 @@ def detect(text: str, layer: str = "visible") -> list[Entity]:
             val = m.group(0)
             score = 0.60
             if typ == "IN_AADHAAR":
-                if not verhoeff_valid(val):
-                    continue
-                score = 0.99
+                if verhoeff_valid(val):
+                    score = 0.99
+                else:
+                    ctx = text.lower()
+                    if any(k in ctx for k in ("aadhaar", "uidai", "unique identification", "mera aadhaar", "vid", "government of india")):
+                        score = 0.85
+                    else:
+                        continue
             elif typ == "IN_PAN":
                 score = 0.95
             elif typ == "IN_GSTIN":
@@ -129,6 +135,11 @@ def detect(text: str, layer: str = "visible") -> list[Entity]:
                 if "passport" not in ctx:
                     continue  # letter+7 digits alone is too common (part numbers, codes)
                 score = 0.90
+            elif typ == "IN_VOTER_ID":
+                ctx = text[max(0, m.start() - 60) : m.end() + 60].lower()
+                if not any(k in ctx for k in ("voter", "epic", "election", "elector", "nirvachan", "identity card", "pehchan")):
+                    continue
+                score = 0.95
             elif typ == "IN_UPI":
                 score = 0.95
             elif typ == "IN_IFSC":
@@ -227,6 +238,7 @@ INTRINSIC_SENSITIVITY: dict[str, float] = {
     "IN_BANK_ACCOUNT": 90.0,
     "IN_PAN": 85.0,
     "IN_PASSPORT": 85.0,
+    "IN_VOTER_ID": 85.0,
     "IN_UPI": 75.0,
     "IN_IFSC": 60.0,
     "IN_GSTIN": 55.0,
@@ -245,6 +257,7 @@ EXPLOITABILITY: dict[str, float] = {
     "IN_BANK_ACCOUNT": 85.0,
     "IN_PAN": 75.0,
     "IN_PASSPORT": 70.0,
+    "IN_VOTER_ID": 70.0,
     "FACE": 70.0,
     "MOBILE_IN": 65.0,
     "EMAIL_ADDRESS": 50.0,
@@ -311,7 +324,7 @@ def mask_value(value: str, entity_type: str) -> str:
 def _calc_linkability(typ: str, types: set[str]) -> float:
     has_person = "PERSON" in types
     has_contact = bool({"MOBILE_IN", "EMAIL_ADDRESS"} & types)
-    has_gov_id = bool({"IN_AADHAAR", "IN_PAN", "IN_PASSPORT"} & types)
+    has_gov_id = bool({"IN_AADHAAR", "IN_PAN", "IN_PASSPORT", "IN_VOTER_ID"} & types)
     has_finance = bool({"IN_BANK_ACCOUNT", "CREDIT_CARD", "IN_UPI"} & types)
     has_datetime = "DATE_TIME" in types
     has_ifsc = "IN_IFSC" in types

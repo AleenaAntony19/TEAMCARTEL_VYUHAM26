@@ -15,26 +15,20 @@ def ocr_words(path: str | Path) -> list[tuple[str, tuple[int, int, int, int]]]:
     if pytesseract is None:
         return []
     img = Image.open(path).convert("RGB")
-    data = pytesseract.image_to_data(
-        img, output_type=pytesseract.Output.DICT, config="--psm 6"
-    )
-    out: list[tuple[str, tuple[int, int, int, int]]] = []
-    for i, text in enumerate(data["text"]):
-        text = (text or "").strip()
-        if not text:
-            continue
-        out.append(
-            (
-                text,
-                (
-                    int(data["left"][i]),
-                    int(data["top"][i]),
-                    int(data["width"][i]),
-                    int(data["height"][i]),
-                ),
-            )
-        )
-    return out
+    # Adaptive OCR: try standard auto segmentation (better for ID cards/multi-column layouts)
+    d_auto = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+    w_auto = [
+        (text.strip(), (int(d_auto["left"][i]), int(d_auto["top"][i]), int(d_auto["width"][i]), int(d_auto["height"][i])))
+        for i, text in enumerate(d_auto["text"]) if (text or "").strip()
+    ]
+    # Also test PSM 6 (single uniform text block)
+    d_6 = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT, config="--psm 6")
+    w_6 = [
+        (text.strip(), (int(d_6["left"][i]), int(d_6["top"][i]), int(d_6["width"][i]), int(d_6["height"][i])))
+        for i, text in enumerate(d_6["text"]) if (text or "").strip()
+    ]
+    words = w_auto if len(w_auto) >= len(w_6) else w_6
+    return words
 
 
 def _ocr_lines(path: str | Path):
