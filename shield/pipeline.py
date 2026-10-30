@@ -12,7 +12,7 @@ import numpy as np
 from . import face, pdq
 from .crawl import Job, Scheduler
 from .deliberate import deliberate
-from .detect import severity, variants
+from .detect import audit_all_extracted_text, severity, variants
 from .ledger import Ledger, sha256_file
 from .matcher import Matcher
 from .models import Entity
@@ -103,6 +103,28 @@ def run_document(src: str | Path, work: str | Path, ledger: Ledger) -> Iterator[
         "ranked_entities": ranked_entities,
     }
 
+    # Full-Document Word Verification & Audit Pass
+    audit_rep = audit_all_extracted_text(prof.layers or {"visible": prof.text}, entities)
+    ledger.append(
+        "VERIFICATION_AUDIT",
+        {
+            "scanned": audit_rep.total_tokens_scanned,
+            "captured": audit_rep.captured_count,
+            "misses": len(audit_rep.potential_misses),
+            "completeness_pct": audit_rep.verification_completeness_pct,
+            "passed": audit_rep.audit_passed,
+        },
+    )
+    yield {
+        "kind": "verification_audit",
+        "report": asdict(audit_rep),
+    }
+
+    # Self-healing: auto-merge high-risk misses into redaction entities
+    for miss in audit_rep.potential_misses:
+        if miss.severity_score >= 60.0:
+            entities.append(Entity("POTENTIAL_LEAK", miss.token, miss.start, miss.end, 0.90, miss.layer))
+
     out = redact(src, entities, work, aggressive=False)
     yield {"kind": "redact", "output": str(out), "sha256": sha256_file(out)}
 
@@ -133,6 +155,7 @@ def run_document(src: str | Path, work: str | Path, ledger: Ledger) -> Iterator[
         "score": score,
         "types": types,
         "ranked_entities": ranked_entities,
+        "verification_audit": asdict(audit_rep),
         "deliberation": [
             {"val": l.entity_val, "type": l.initial_type, "verdict": l.final_verdict, "score": l.final_score}
             for l in debate_logs

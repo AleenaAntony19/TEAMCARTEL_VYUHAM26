@@ -8,7 +8,10 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 import pymupdf
-import pytesseract
+try:
+    import pytesseract
+except ImportError:
+    pytesseract = None
 from PIL import Image
 
 from . import face

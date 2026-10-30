@@ -83,3 +83,27 @@ class RankedEntity:
     factors: SeverityFactors
     occurrences: int = 1
     layer: str = "visible"
+
+
+@dataclass
+class TokenAuditResult:
+    token: str
+    masked_token: str
+    layer: str
+    start: int
+    end: int
+    severity_score: float
+    band: str
+    factors: SeverityFactors
+    is_captured_by_detector: bool
+    suspected_category: str
+
+
+@dataclass
+class VerificationAuditReport:
+    total_tokens_scanned: int
+    captured_count: int
+    potential_misses: list[TokenAuditResult] = field(default_factory=list)
+    verification_completeness_pct: float = 100.0
+    audit_passed: bool = True
+

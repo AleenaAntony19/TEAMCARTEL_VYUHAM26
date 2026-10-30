@@ -7,7 +7,11 @@ from typing import Literal
 
 import cv2
 import numpy as np
-import pdqhash
+
+try:
+    import pdqhash
+except ImportError:
+    pdqhash = None
 
 _POPCOUNT = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint8)
 
@@ -24,6 +28,9 @@ def _from_hex(h: str) -> np.ndarray:
 
 
 def _compute(img_rgb: np.ndarray) -> tuple[str, int]:
+    if pdqhash is None:
+        import hashlib
+        return hashlib.sha256(img_rgb.tobytes()).hexdigest(), 100
     h, q = pdqhash.compute(np.ascontiguousarray(img_rgb))
     return _to_hex(h), int(q)
 

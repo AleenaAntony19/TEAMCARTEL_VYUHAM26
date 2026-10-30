@@ -132,3 +132,61 @@ def test_severity_tuple_and_attribute_access():
     empty_res = severity([])
     assert empty_res == (0, "NONE", [])
     assert empty_res.ranked_entities == []
+
+
+def test_shannon_entropy():
+    from shield.detect import _shannon_entropy
+
+    low = _shannon_entropy("aaaaaaa")
+    med = _shannon_entropy("standard")
+    high = _shannon_entropy("AKIAIOSFODNN7EXAMPLE")
+    assert low == 0.0
+    assert high > med > low
+
+
+def test_audit_clean_document_passes_100_percent():
+    from shield.detect import audit_all_extracted_text, detect
+
+    clean_text = "This is a quarterly review document published for internal company purposes."
+    entities = detect(clean_text)
+    rep = audit_all_extracted_text({"visible": clean_text}, entities)
+
+    assert rep.audit_passed is True
+    assert rep.verification_completeness_pct == 100.0
+    assert len(rep.potential_misses) == 0
+    assert rep.total_tokens_scanned > 0
+
+
+def test_audit_catches_unflagged_12digit_and_secret_tokens():
+    from shield.detect import audit_all_extracted_text, detect
+
+    text = """
+    Employee: Ravi Kumar
+    Valid Aadhaar: 2345 6789 0128
+    Unflagged Number: 2345 6789 0120
+    Access Key: AKIAIOSFODNN7EXAMPLE
+    """
+    entities = detect(text)
+    rep = audit_all_extracted_text({"visible": text}, entities)
+
+    # Detector caught Ravi Kumar and the valid Aadhaar
+    assert any(e.type == "IN_AADHAAR" for e in entities)
+    assert not any(e.value == "2345 6789 0120" for e in entities)
+
+    # But the all-word auditor caught the unflagged number and the access secret!
+    assert rep.audit_passed is False
+    assert rep.verification_completeness_pct < 100.0
+    missed_tokens = {m.token for m in rep.potential_misses}
+    assert "2345 6789 0120" in missed_tokens
+    assert "AKIAIOSFODNN7EXAMPLE" in missed_tokens
+
+    # Verify categories and scores
+    miss_12 = [m for m in rep.potential_misses if m.token == "2345 6789 0120"][0]
+    assert miss_12.suspected_category == "UNCLASSIFIED_12DIGIT_NUMERIC"
+    assert miss_12.severity_score >= 65.0
+    assert miss_12.band in ("HIGH", "CRITICAL")
+
+    miss_sec = [m for m in rep.potential_misses if m.token == "AKIAIOSFODNN7EXAMPLE"][0]
+    assert miss_sec.suspected_category == "HIGH_ENTROPY_SECRET"
+    assert miss_sec.severity_score >= 65.0
+
