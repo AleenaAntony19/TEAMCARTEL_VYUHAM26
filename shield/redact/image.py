@@ -74,6 +74,12 @@ def _close(a: str, b: str) -> bool:
     return sum(x != y for x, y in zip(a, b)) <= budget
 
 
+def _line_has(line_text: str, variant: str) -> bool:
+    """OCR-tolerant containment: alphanumerics only (drops OCR'd em-dashes/stray spaces), <= 2 misread glyphs."""
+    target, hay = _alnum(variant), _alnum(line_text)
+    return bool(target) and any(_close(hay[k : k + len(target)], target) for k in range(len(hay) - len(target) + 1))
+
+
 def _fill_entity(draw, line_text: str, words, variant: str, pad: int) -> bool:
     """Fill every run of consecutive OCR words whose alphanumerics match `variant`."""
     target = _alnum(variant)
@@ -121,7 +127,7 @@ def redact_image(
 
         if aggressive:
             for line_text, words in lines:
-                if any(v in line_text for v in variants(e.value)):
+                if any(_line_has(line_text, v) for v in variants(e.value)):
                     for _, (x, y, w, h) in words:
                         draw.rectangle([x - 4, y - 4, x + w + 4, y + h + 4], fill=(0, 0, 0))
         else:

@@ -165,3 +165,37 @@ def test_sast_evidence_never_carries_a_neighbouring_secret(tmp_path):
     res = scan(tmp_path, engines=["sast", "secrets"], ocr=False)
     assert any(f["rule"] == "B506" and "yaml.load" in f["evidence"] for f in res["findings"])
     assert key not in json.dumps(res)
+
+
+def test_dark_code_screenshot_secrets_found_separately_and_redacted(tmp_path):
+    """Code screenshot (light text on dark): every key is its own finding, and Redact image removes them."""
+    import pytesseract
+    from PIL import Image, ImageDraw, ImageFont
+
+    groq, aws = "gsk_" + _rand(44), "AKIA" + "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(16))
+    img = Image.new("RGB", (1500, 220), (30, 30, 30))
+    d = ImageDraw.Draw(img)
+    font = ImageFont.load_default(size=30)
+    d.text((20, 30), f'GROQ_API_KEY = "{groq}"', fill=(230, 180, 140), font=font)
+    d.text((20, 120), f'AWS_KEY = "{aws}"', fill=(230, 180, 140), font=font)
+    img.save(tmp_path / "shot.png")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+
+    res = scan(tmp_path, engines=["media"])
+    found = [f for f in res["findings"] if f["rule"] == "OCR_SECRET"]
+    if not found and "AKIA" not in pytesseract.image_to_string(Image.open(tmp_path / "shot.png")):
+        pytest.skip("tesseract cannot read the test font here")
+    assert len(found) == 2, [f["masked"] for f in found]  # both survive de-duplication
+    assert all(f["bbox"] and f["message"].startswith("CRITICAL: Rotate") for f in found)
+    assert groq not in json.dumps(res) and aws not in json.dumps(res)
+
+    apply_plan(plan_fix(tmp_path, found[0], "redact_image"), tmp_path)
+    text = pytesseract.image_to_string(Image.open(tmp_path / "shot.png"))
+    assert aws not in text and groq[:20] not in text
+    assert not [f for f in scan(tmp_path, engines=["media"])["findings"] if f["rule"] == "OCR_SECRET"], "backup in .shield/ must not be re-scanned"
+
+
+def test_aws_documentation_example_key_is_not_a_finding(tmp_path):
+    (tmp_path / "a.py").write_text('K = "AKIAIOSFODNN7EXAMPLE"\nR = "AKIA' + "Q" * 16 + '"\n')
+    rules = [(f["rule"], f["line"]) for f in scan(tmp_path, engines=["secrets"], ocr=False)["findings"] if f["rule"] == "AWS Access Key"]
+    assert rules == [("AWS Access Key", 2)]

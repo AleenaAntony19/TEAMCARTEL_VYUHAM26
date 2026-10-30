@@ -21,6 +21,11 @@ EXTRA_RULES = {
 CRITICAL = {"Groq Token", "Anthropic Token", "Google API Key", "Hugging Face Token", "OpenAI Token", "GitHub Token", "AWS Access Key", "Private Key"}
 
 
+def is_doc_example(value: str) -> bool:
+    """Vendor documentation sample keys (AWS: AKIAIOSFODNN7EXAMPLE, wJalr...EXAMPLEKEY) are published, not secrets."""
+    return value.endswith("EXAMPLE") or value.endswith("EXAMPLEKEY")
+
+
 def _severity(rule: str) -> str:
     if rule in CRITICAL:
         return "critical"
@@ -59,7 +64,8 @@ def scan_secrets(files: list[Path], root: Path) -> list[Finding]:
         for i, line in enumerate(lines, 1):
             for rule, pat in EXTRA_RULES.items():
                 for m in pat.finditer(line):
-                    hits.append((rule, i, m.start(), m.end(), m.group(0), 0.95))
+                    if not is_doc_example(m.group(0)):
+                        hits.append((rule, i, m.start(), m.end(), m.group(0), 0.95))
         try:
             for rule, i, value in _detect_secrets(path):
                 line = lines[i - 1] if 0 < i <= len(lines) else ""
@@ -115,6 +121,8 @@ def scan_history(root: Path) -> list[Finding]:
         for rule, pat in EXTRA_RULES.items():
             for m in pat.finditer(line):
                 value = m.group(0)
+                if is_doc_example(value):
+                    continue
                 out.append(
                     Finding(
                         id=fingerprint(rule, "history", line, value),
