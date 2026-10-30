@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,8 +31,12 @@ def _has_vector(details) -> bool:
     return False
 
 
+_HASH = re.compile(r"\b[0-9a-f]{32,128}\b")
+
+
 def _has_pii(details) -> bool:
-    text = json.dumps(details, default=str)
+    # digests are allowed: their digit runs can look like phone/Aadhaar numbers but carry no personal data
+    text = _HASH.sub("<hash>", json.dumps(details, default=str))
     for e in detect(text):
         if e.type in {"IN_AADHAAR", "IN_PAN", "MOBILE_IN", "EMAIL_ADDRESS"}:
             return True

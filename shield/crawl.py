@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -62,8 +63,9 @@ def _image_urls(soup: BeautifulSoup, base: str) -> set[str]:
 
 
 class Scheduler:
-    def __init__(self, rps_per_domain: float = 1.0, global_concurrency: int = 8, budget_pages: int = 500):
+    def __init__(self, rps_per_domain: float = 1.0, global_concurrency: int = 8, budget_pages: int = 500, max_depth: int = 10):
         self.rps = rps_per_domain
+        self.max_depth = max_depth
         self.sem = asyncio.Semaphore(global_concurrency)
         self.budget_pages = budget_pages
         self.q: asyncio.PriorityQueue = asyncio.PriorityQueue()
@@ -153,7 +155,7 @@ class Scheduler:
         for ref in sorted(refs):
             self.push(job.tier, job.risk, Job(ref, "image", job.depth, domain, job.url, job.seed_category))
 
-        if job.depth < 10:
+        if job.depth < self.max_depth:
             for nxt in next_urls:
                 if urlparse(nxt).netloc == urlparse(job.url).netloc:
                     self.push(job.tier, job.risk, Job(nxt, "page", job.depth + 1, domain, job.url, job.seed_category))
@@ -210,7 +212,8 @@ async def _gallery_refs(url: str, fetcher, soup: BeautifulSoup) -> set[str]:
         from playwright.async_api import async_playwright
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            # SHIELD_PLAYWRIGHT_CHANNEL=chrome uses an installed Chrome when the bundled build is missing
+            browser = await p.chromium.launch(headless=True, channel=os.getenv("SHIELD_PLAYWRIGHT_CHANNEL") or None)
             page = await browser.new_page()
             await page.route("**/*", fetcher.guard_route)
             await page.goto(url, wait_until="domcontentloaded", timeout=15000)

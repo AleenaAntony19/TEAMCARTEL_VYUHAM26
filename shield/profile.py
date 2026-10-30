@@ -11,7 +11,6 @@ import pymupdf
 import pytesseract
 from PIL import Image
 
-from . import face
 from .detect import detect
 from .models import Entity
 
@@ -45,21 +44,39 @@ DOMAIN_KEYWORDS = {
 }
 
 
-def _text_for(path: Path) -> str:
+def layer_texts(path: Path) -> dict[str, str]:
+    """Text per document layer. Entity offsets are relative to their layer's text."""
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        doc = pymupdf.open(path)
-        return "".join(p.get_text() for p in doc)
+        with pymupdf.open(path) as doc:
+            visible = "".join(p.get_text() for p in doc)
+            annots = "\n".join(
+                (a.info or {}).get("content", "") or "" for p in doc for a in (p.annots() or [])
+            )
+            embedded = "\n".join(
+                doc.embfile_get(n).decode("utf-8", "ignore") for n in doc.embfile_names()
+            )
+            meta = "\n".join(str(v) for v in (doc.metadata or {}).values() if v)
+            meta += "\n" + (doc.get_xml_metadata() or "")
+        return {"visible": visible, "annotations": annots, "embedded": embedded, "metadata": meta}
     if suffix in {".docx", ".xlsx"}:
         from .redact.docx import ooxml_text
 
-        return ooxml_text(path)
+        with zipfile.ZipFile(path) as z:
+            meta = "\n".join(
+                z.read(n).decode("utf-8", "ignore") for n in z.namelist() if n.startswith("docProps/")
+            )
+        return {"ooxml": ooxml_text(path), "metadata": meta}
     if suffix in {".jpg", ".jpeg", ".png"}:
+        img = Image.open(path)
+        exif = "\n".join(str(v) for v in img.getexif().values() if isinstance(v, (str, bytes)))
+        exif += "\n" + "\n".join(str(v) for v in img.info.values() if isinstance(v, str))
         try:
-            return pytesseract.image_to_string(Image.open(path))
+            ocr = pytesseract.image_to_string(img)
         except Exception:
-            return ""
-    return path.read_text(errors="ignore")
+            ocr = ""
+        return {"ocr": ocr, "exif": exif}
+    return {"text": path.read_text(errors="ignore")}
 
 
 def _has_images(path: Path) -> bool:
@@ -115,8 +132,9 @@ def extract_images(path: str | Path) -> list[tuple[str, np.ndarray, tuple | None
 
 def profile(path: str | Path) -> Profile:
     path = Path(path)
-    text = _text_for(path)
-    entities = detect(text)
+    layers = layer_texts(path)
+    text = "\n".join(layers.values())
+    entities = [e for name, t in layers.items() for e in detect(t, layer=name)]
     tags = []
     lower = text.lower()
     for tag, words in DOMAIN_KEYWORDS.items():
@@ -124,17 +142,8 @@ def profile(path: str | Path) -> Profile:
             tags.append(tag)
     locale = ["INDIA"] if any(e.type.startswith("IN_") for e in entities) else []
 
-    layers: dict[str, str] = {}
-    suffix = path.suffix.lower()
-    if suffix == ".pdf":
-        layers = {"visible": text, "annotations": "", "embedded": "", "metadata": ""}
-    elif suffix in {".docx", ".xlsx"}:
-        layers = {"ooxml": text, "metadata": ""}
-    elif suffix in {".jpg", ".jpeg", ".png"}:
-        layers = {"ocr": text, "exif": ""}
-
     return Profile(
-        file_format=suffix.lstrip(".").upper() or "UNKNOWN",
+        file_format=path.suffix.lstrip(".").upper() or "UNKNOWN",
         domain_tags=tags,
         locale_hints=locale,
         has_images=_has_images(path),

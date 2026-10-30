@@ -11,3 +11,6 @@ node_modules/
 dist/
 demo/leak_bank.json
 
+*.vsix
+*.tsbuildinfo
+

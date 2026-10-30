@@ -4,13 +4,14 @@ import json
 import subprocess
 from pathlib import Path
 
-from . import Finding, fingerprint
+from . import SKIP_DIRS, Finding, fingerprint
 
 
-def scan_sast(root: Path) -> list[Finding]:
+def scan_sast(root: Path, exclude: tuple[str, ...] = ()) -> list[Finding]:
+    skip = ",".join(str(root / d) for d in sorted(SKIP_DIRS)) + "".join("," + str(root / e) for e in exclude if "*" not in e)
     try:
         proc = subprocess.run(
-            ["bandit", "-r", str(root), "-f", "json", "-q"],
+            ["bandit", "-r", str(root), "-f", "json", "-q", "-x", skip],
             capture_output=True,
             text=True,
             timeout=90,
@@ -22,7 +23,7 @@ def scan_sast(root: Path) -> list[Finding]:
 
     out = []
     for item in data.get("results", []):
-        rule = f"B{item.get('test_id', '')}"
+        rule = item.get("test_id", "")  # already 'B506' etc.
         sev = {"HIGH": "high", "MEDIUM": "medium", "LOW": "low"}.get(item.get("issue_severity", "LOW"), "low")
         file = item.get("filename", "")
         try:
@@ -45,6 +46,8 @@ def scan_sast(root: Path) -> list[Finding]:
                 message=item.get("issue_text", "")[:200],
                 masked="",
                 fixes=["yaml_safe_load"] if rule == "B506" else (["requests_verify"] if rule == "B501" else ["ignore"]),
+                confidence={"HIGH": 0.9, "MEDIUM": 0.7, "LOW": 0.5}.get(item.get("issue_confidence", "LOW"), 0.5),
+                evidence=text.strip().splitlines()[0][:200] if text.strip() else "",
             )
         )
     return out

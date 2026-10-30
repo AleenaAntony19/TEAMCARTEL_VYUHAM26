@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Block commits that add secrets or Indian PII. Enable with: git config core.hooksPath .githooks
+set -euo pipefail
+files=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$files" ] && exit 0
+root=$(git rev-parse --show-toplevel)
+PY=${SHIELD_PYTHON:-python3}
+report=$(mktemp)
+trap 'rm -f "$report"' EXIT
+# shellcheck disable=SC2086
+if ! PYTHONPATH="$root" "$PY" -m shield.codescan scan "$root" --engines secrets,pii --no-ocr --format md --files $files > "$report"; then
+  cat "$report"
+  echo "shield: commit blocked (critical/high findings). Fix, or add the finding id to .shieldignore if it is a false positive."
+  exit 1
+fi

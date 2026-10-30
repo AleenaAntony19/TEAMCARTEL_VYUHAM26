@@ -1,0 +1,70 @@
+{
+  "name": "shield-code",
+  "displayName": "Shield·Code",
+  "description": "Scan a workspace for secrets, Indian PII, unsafe code, risky config and sensitive images/documents; review and apply safe fixes with a preview.",
+  "version": "0.2.0",
+  "publisher": "shield-scout",
+  "license": "UNLICENSED",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Linters", "Other"],
+  "main": "./dist/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "commands": [
+      { "command": "shieldCode.scanWorkspace", "title": "Shield: Scan Workspace", "icon": "$(shield)" },
+      { "command": "shieldCode.scanFile", "title": "Shield: Scan Current File" },
+      { "command": "shieldCode.exportSarif", "title": "Shield: Export SARIF Report" },
+      { "command": "shieldCode.showOutput", "title": "Shield: Show Log" },
+      { "command": "shieldCode.previewFix", "title": "Shield: Preview Fix" },
+      { "command": "shieldCode.explainFinding", "title": "Shield: Explain Finding with AI" },
+      { "command": "shieldCode.revealFinding", "title": "Shield: Reveal Finding" }
+    ],
+    "viewsContainers": {
+      "activitybar": [{ "id": "shieldCode", "title": "Shield·Code", "icon": "$(shield)" }]
+    },
+    "views": {
+      "shieldCode": [
+        { "id": "shieldCode.findings", "name": "Findings" },
+        { "id": "shieldCode.ai", "name": "AI Provider", "type": "webview" }
+      ]
+    },
+    "menus": {
+      "view/title": [{ "command": "shieldCode.scanWorkspace", "when": "view == shieldCode.findings", "group": "navigation" }],
+      "commandPalette": [
+        { "command": "shieldCode.previewFix", "when": "false" },
+        { "command": "shieldCode.revealFinding", "when": "false" },
+        { "command": "shieldCode.explainFinding", "when": "false" }
+      ]
+    },
+    "configuration": {
+      "title": "Shield·Code",
+      "properties": {
+        "shieldCode.pythonPath": { "type": "string", "default": "python3", "description": "Python interpreter that has the shield_scout requirements installed." },
+        "shieldCode.enginePath": { "type": "string", "default": "", "description": "Folder that contains the `shield` package (the shield_scout checkout). Added to PYTHONPATH." },
+        "shieldCode.engines": { "type": "array", "items": { "type": "string", "enum": ["secrets", "pii", "sast", "config", "media", "document"] }, "default": ["secrets", "pii", "sast", "config", "media", "document"] },
+        "shieldCode.ocr.enabled": { "type": "boolean", "default": true, "description": "OCR images and embedded document images (needs tesseract)." },
+        "shieldCode.scanOnSave": { "type": "boolean", "default": true, "description": "Re-scan a file (secrets + PII) when it is saved." },
+        "shieldCode.maxFileSizeMB": { "type": "number", "default": 2, "minimum": 0.1, "maximum": 50 },
+        "shieldCode.exclude": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Globs on workspace-relative paths to skip (node_modules, .git, venvs are always skipped)." },
+        "shieldCode.concurrency": { "type": "number", "default": 4, "minimum": 1, "maximum": 16, "description": "Analyzers run in parallel up to this many." },
+        "shieldCode.timeoutSeconds": { "type": "number", "default": 300, "minimum": 10, "maximum": 3600 },
+        "shieldCode.minSeverity": { "type": "string", "enum": ["critical", "high", "medium", "low"], "default": "low" },
+        "shieldCode.llm.provider": { "type": "string", "enum": ["none", "groq", "anthropic"], "default": "none", "description": "Set from the AI Provider panel. Keys are stored in VS Code Secret Storage, never in settings." },
+        "shieldCode.llm.model": { "type": "string", "default": "" }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "package": "npm run build && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/vscode": "1.90.0",
+    "@vscode/vsce": "4.0.0",
+    "esbuild": "0.28.2",
+    "typescript": "6.0.3"
+  }
+}

@@ -1,63 +1,52 @@
 #!/usr/bin/env bash
+# Every automated check: Python tests + lint, web typecheck/test/build, extension typecheck/test/build, mock-web scout run.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+source "${SHIELD_VENV:-/Users/aaronr/py311}/bin/activate"
+export PYTHONPATH="$ROOT_DIR" SHIELD_ALLOW_LOCAL=1
 
-source /Users/aaronr/py311/bin/activate
-export PYTHONPATH="$ROOT_DIR"
-export SHIELD_ALLOW_LOCAL=1
-
-echo "==> Running pytest..."
-pytest -q
-
-echo "==> Generating demo fixtures and mock web..."
+echo "==> fixtures + mock web"
 python demo/make_fixtures.py demo/out > /dev/null
 python demo/make_mockweb.py > /dev/null
 
-echo "==> Testing Shield·Code scanner CLI..."
-python -m shield.codescan scan shield --format json | python -m json.tool > /dev/null || true
-echo "Shield·Code scan JSON generation OK"
+echo "==> pytest"
+pytest -q
 
-echo "==> Starting mock leak server..."
+echo "==> ruff (errors only)"
+ruff check shield tests --select F,E9
+
+echo "==> web"
+(cd web && npm ci --no-audit --no-fund >/dev/null && npm run typecheck && npm test && npm run build >/dev/null)
+
+echo "==> vscode extension"
+(cd vscode && npm ci --no-audit --no-fund >/dev/null && npm run typecheck && npm test && npm run build >/dev/null)
+
+echo "==> codescan CLI emits valid JSON"
+python -m shield.codescan scan shield --no-ocr --format json | python -m json.tool > /dev/null || [ "${PIPESTATUS[0]}" = 1 ]
+
+echo "==> mock leak web scout run"
 python demo/serve.py &
 SERVER_PID=$!
+trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 sleep 1
-
-cleanup() {
-    kill "$SERVER_PID" 2>/dev/null || true
-}
-trap cleanup EXIT
-
-echo "==> Testing leak scout crawler against mock web..."
 python - <<'PY'
-import asyncio, json
-from pathlib import Path
-from shield.ledger import Ledger
-from shield.pipeline import run_scout
+import asyncio
 from shield import pdq
+from shield.ledger import Ledger
 from shield.models import BASE
-
-bank = pdq.HashBank.load(BASE / "demo/leak_bank.json")
+from shield.pipeline import run_scout
 
 async def main():
     led = Ledger()
-    events = []
-    async for ev in run_scout([], bank, BASE / "registry/seeds.yaml", "Acme Corp", ["IN_AADHAAR"], "acme.in", led):
-        events.append(ev)
-    done_evs = [e for e in events if e.get("kind") == "done"]
-    assert done_evs, "No done event found"
-    rep = done_evs[0]["report"]["scout"]
-    matches = rep["matches"]
-    counters = rep["counters"]
-    bad_block = led.verify()
-    print(f"Scout run complete: {len(matches)} matches, pages: {counters.get('pages')}, images: {counters.get('images')}, blocked: {counters.get('blocked')}")
-    print(f"Ledger verification: {'OK' if bad_block is None else f'FAILED at {bad_block}'}")
-    assert bad_block is None, "Ledger integrity check failed"
-    assert len(matches) > 0, "Expected matches against mock web"
+    bank = pdq.HashBank.load(BASE / "demo/leak_bank.json")
+    events = [ev async for ev in run_scout([], bank, BASE / "registry/seeds.yaml", "Acme Corp", ["IN_AADHAAR"], "acme.in", led)]
+    rep = next(e for e in events if e["kind"] == "done")["report"]["scout"]
+    assert led.verify() is None, "ledger broken"
+    assert rep["matches"], "expected PDQ matches on the mock web"
+    print(f"scout: {len(rep['matches'])} matches, {rep['counters']}")
 
 asyncio.run(main())
 PY
-
-echo "==> All validation checks passed successfully! 🛡️"
+echo "==> all checks passed"
