@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import re
 import zipfile
 from pathlib import Path
@@ -15,14 +14,14 @@ REL = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 
 
 def _targets(entities) -> dict[str, str]:
-    from ..detect import variants
+    from ..detect import replacement, variants
 
     out: dict[str, str] = {}
     for e in entities:
         if e.type == "FACE":
             continue
         for v in variants(e.value):
-            out[v] = e.type
+            out[v] = replacement(e, v)
     return out
 
 
@@ -30,7 +29,7 @@ def _apply(text: str, repl: dict[str, str]) -> str:
     if not text or not repl:
         return text
     pat = re.compile("|".join(re.escape(k) for k in sorted(repl, key=len, reverse=True)))
-    return pat.sub(lambda m: f"[REDACTED-{repl[m.group(0)]}]", text)
+    return pat.sub(lambda m: repl[m.group(0)], text)
 
 
 def _process_xml(name: str, data: bytes, repl: dict[str, str]) -> bytes | None:

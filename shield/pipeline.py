@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import tempfile
 from pathlib import Path
 from typing import AsyncIterator, Iterator
 
-import cv2
-import numpy as np
 
 from . import face, pdq
 from .crawl import Job, Scheduler
-from .deliberate import deliberate
-from .detect import severity, variants
+from dataclasses import asdict
+
+from .review import review
+from .detect import severity
 from .ledger import Ledger, sha256_file
 from .matcher import Matcher
 from .models import Entity
@@ -61,34 +60,12 @@ def run_document(src: str | Path, work: str | Path, ledger: Ledger) -> Iterator[
         except Exception:
             continue
 
-    # Multi-Persona Dialectic Deliberation Swarm
-    entities, debate_logs = deliberate(entities, prof.text)
+    entities, review_records = review(entities, prof.layers)
     ledger.append(
-        "CONSENSUS_REACHED",
-        {"debated_count": len(debate_logs), "confirmed_count": len(entities)},
+        "REVIEW",
+        {"reviewed": len(review_records), "kept": len(entities)},
     )
-    yield {
-        "kind": "deliberation",
-        "logs": [
-            {
-                "val": log.entity_val,
-                "type": log.initial_type,
-                "verdict": log.final_verdict,
-                "score": log.final_score,
-                "turns": [
-                    {
-                        "persona": t.persona,
-                        "avatar": t.avatar,
-                        "action": t.action,
-                        "argument": t.argument,
-                        "confidence": t.confidence,
-                    }
-                    for t in log.turns
-                ],
-            }
-            for log in debate_logs
-        ],
-    }
+    yield {"kind": "review", "records": [asdict(r) for r in review_records]}
 
     ledger.append("DETECT", {"counts": _counts(entities)})
     score, band_str, types = severity(entities)
@@ -123,10 +100,7 @@ def run_document(src: str | Path, work: str | Path, ledger: Ledger) -> Iterator[
         "severity": band_str,
         "score": score,
         "types": types,
-        "deliberation": [
-            {"val": l.entity_val, "type": l.initial_type, "verdict": l.final_verdict, "score": l.final_score}
-            for l in debate_logs
-        ],
+        "review": [asdict(r) for r in review_records],
         "attacks": [{"name": a.name, "passed": a.passed, "evidence": a.evidence} for a in attacks],
         "status": status,
         "face_vectors_count": sum(1 for e in entities if e.type == "FACE"),
@@ -154,7 +128,8 @@ async def run_scout(
     queries = build_queries(org, types, domain)
     text_hits: list[dict] = []
     for q in queries:
-        allowed = firewall(q, [org] if org else [])
+        # org/domain are meant to be searched; the firewall blocks personal values detected in the query
+        allowed = firewall(q, [])
         yield {"kind": "query", "query": q, "allowed": allowed}
         if not allowed:
             continue

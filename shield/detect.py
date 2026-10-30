@@ -38,8 +38,6 @@ def verhoeff_valid(s: str) -> bool:
     s = _digits(s)
     if not s:
         return False
-    if s == "234567890128":
-        return True
     c = 0
     for i, ch in enumerate(reversed(s)):
         c = _D[c][_P[i % 8][int(ch)]]
@@ -85,8 +83,8 @@ PATTERNS: dict[str, re.Pattern] = {
     "CREDIT_CARD": re.compile(r"\b(?:\d[ -]?){13,19}\b"),
     "IN_BANK_ACCOUNT": re.compile(r"\b\d{9,18}\b"),
     "PERSON": re.compile(
-        r"(?:Employee\s+Name:?|Employee(?:\s+ID)?:?|Name\s*:|Mr\.?|Mrs\.?|Ms\.?|Dr\.?|Shri|Smt\.?)\s+"
-        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})"
+        r"(?:Employee[ \t]+Name:?|Employee(?:[ \t]+ID)?:?|Name[ \t]*:|Mr\.?|Mrs\.?|Ms\.?|Dr\.?|Shri|Smt\.?)[ \t]+"
+        r"([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){0,2})"  # names never span lines
     ),
     "ORG": re.compile(r"\b[A-Z][A-Za-z&]+(?:\s+(?:Corp|Ltd|Inc|Pvt|LLP|Bank|Technologies|Solutions))\b"),
     "DATE_TIME": re.compile(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b"),
@@ -172,6 +170,18 @@ def variants(value: str) -> set[str]:
         out.add(f"+91-{stripped[:5]}-{stripped[5:]}")
         out.add(f"+91{stripped}")
     return {v for v in out if v}
+
+
+ACTIONS = ("token", "mask", "remove")
+
+
+def replacement(e: Entity, matched: str) -> str:
+    """Text that replaces `matched` (one variant of e.value) under the entity's action."""
+    if e.action == "remove":
+        return ""
+    if e.action == "mask":
+        return "".join("X" if c.isalnum() else c for c in matched)
+    return f"[REDACTED-{e.type}]"
 
 
 def severity(entities: list[Entity]) -> tuple[int, str, list[str]]:

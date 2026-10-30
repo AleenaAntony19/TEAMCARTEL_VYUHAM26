@@ -79,7 +79,7 @@ The Document Shield operates as an autonomous multi-stage pipeline:
 2. **Layer Separation:** Dissects visible text, hidden comments, revision markers (`w:ins`/`w:del`), formula caches (`<v>`), metadata headers (`core.xml`, `app.xml`, `custom.xml`), and embedded raster images.
 3. **Multi-Persona Detection:** Parallel agents extract candidate PII and run cross-layer linkability algorithms.
 4. **Physical Object Destruction:**
-   - **PDF:** Searches all spacing variants (`2345 6789 0128` vs `234567890128`), adds redaction annotations, and invokes `apply_redactions(images=PDF_REDACT_IMAGE_PIXELS)`. Destroys metadata, XML metadata packets, font caches, and embedded files.
+   - **PDF:** Searches all spacing variants (`2345 6789 0124` vs `234567890124`), adds redaction annotations, and invokes `apply_redactions(images=PDF_REDACT_IMAGE_PIXELS)`. Destroys metadata, XML metadata packets, font caches, and embedded files.
    - **DOCX:** Operates directly on the ZIP/lxml XML tree. Unwraps insertions, drops tracked deletions, joins split runs (`w:r`) at the paragraph level, strips author identities, and unlinks `custom.xml`.
    - **XLSX:** Scrubs formula evaluation caches, comments, defined name ranges, pivot caches, and `veryHidden` sheets.
    - **Images:** OCR word box matching with black pixel fill, stripping 100% of EXIF, IPTC, and XMP headers.

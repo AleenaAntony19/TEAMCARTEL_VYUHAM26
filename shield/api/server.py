@@ -1,0 +1,783 @@
+"""Shield·Scout HTTP API (FastAPI). Run: python -m shield.api  (binds 127.0.0.1:8000 by default).
+
+Development model: single local user, no accounts. Set SHIELD_API_TOKEN to require
+`Authorization: Bearer <token>` on every /api route; see SECURITY.md before exposing it on a network.
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import io
+import logging
+import os
+import secrets
+import shutil
+import tempfile
+import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Literal
+
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, field_validator
+
+from .. import llm, pdq, uploads, verify
+from ..detect import detect, replacement
+from ..ledger import Ledger
+from ..models import BASE, SFACE, YUNET, Entity
+from ..redact import redact, redact_text
+from ..review import mask_value, review
+
+log = logging.getLogger("shield.api")
+
+WORK_ROOT = Path(os.getenv("SHIELD_WORK_DIR") or Path(tempfile.gettempdir()) / "shield-work")
+JOB_TTL = int(os.getenv("SHIELD_JOB_TTL_SECONDS", "3600"))
+MAX_JOBS = int(os.getenv("SHIELD_MAX_JOBS", "2"))
+MAX_PENDING = int(os.getenv("SHIELD_MAX_PENDING", "16"))
+CRAWL_MAX_PAGES = int(os.getenv("SHIELD_CRAWL_MAX_PAGES", "100"))
+CRAWL_MAX_DEPTH = int(os.getenv("SHIELD_CRAWL_MAX_DEPTH", "3"))
+CRAWL_RPS = float(os.getenv("SHIELD_CRAWL_RPS", "1"))
+CRAWL_TIMEOUT = float(os.getenv("SHIELD_CRAWL_TIMEOUT", "120"))
+REGISTRY = Path(os.getenv("SHIELD_REGISTRY") or BASE / "registry/seeds.yaml")
+API_TOKEN = os.getenv("SHIELD_API_TOKEN", "")
+LOCAL_ONLY = os.getenv("SHIELD_LOCAL_ONLY") == "1"
+FACE_REGIONS = os.getenv("SHIELD_FACE_REGIONS", "1") == "1"
+
+SEVERITY = {
+    "IN_AADHAAR": "critical", "CREDIT_CARD": "critical", "IN_BANK_ACCOUNT": "critical",
+    "IN_PAN": "high", "IN_PASSPORT": "high", "IN_UPI": "high", "IN_IFSC": "medium",
+    "MOBILE_IN": "medium", "EMAIL_ADDRESS": "medium", "IN_GSTIN": "medium",
+    "PERSON": "low", "ORG": "low", "DATE_TIME": "low", "FACE": "high",
+}
+RECOMMEND = {
+    "IN_AADHAAR": "Remove or replace; Aadhaar must not be shared outside authorised KYC flows (masked form keeps last 4 at most).",
+    "CREDIT_CARD": "Remove; card numbers must not be stored or shared (PCI-DSS).",
+    "IN_BANK_ACCOUNT": "Remove or tokenise the account number.",
+    "IN_PAN": "Replace with a token unless the recipient needs it for tax purposes.",
+    "FACE": "Remove the photo region (opaque fill) unless the person consented to sharing.",
+}
+FILE_ACTIONS = {".pdf": ["remove"], ".png": ["remove"], ".jpg": ["remove"], ".jpeg": ["remove"]}  # opaque fill only
+ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+# ---------- job model ----------
+@dataclass
+class Stage:
+    name: str
+    status: str = "pending"  # pending | running | done | failed | skipped | cancelled
+    detail: str = ""
+    ms: int = 0
+
+
+@dataclass
+class Job:
+    id: str
+    kind: str  # analysis | discovery
+    created: float
+    workdir: Path
+    status: str = "queued"  # queued | running | ready | failed | cancelled
+    stages: list[Stage] = field(default_factory=list)
+    display_name: str = ""
+    suffix: str = ""
+    findings: list[dict] = field(default_factory=list)
+    entities: dict[str, Entity] = field(default_factory=dict)  # finding id -> entity (never serialised)
+    redaction: dict | None = None
+    discovery: dict | None = None
+    error: str = ""
+    cancel: threading.Event = field(default_factory=threading.Event)
+    state: str = "new"
+    raw: tuple | None = None  # (all detected entities, layer texts) for the deliberation stream; never serialised
+    ledger: Ledger = field(default_factory=Ledger)
+
+    def public(self) -> dict:
+        return {
+            "id": self.id, "kind": self.kind, "status": self.status, "created": self.created, "state": self.state,
+            "display_name": self.display_name, "input_type": self.suffix.lstrip(".") or "text",
+            "stages": [asdict(s) for s in self.stages], "findings": self.findings,
+            "redaction": self.redaction, "discovery": self.discovery, "error": self.error,
+        }
+
+
+class Cancelled(Exception):
+    pass
+
+
+# Allowed graph transitions for an analysis job. red_team_attack -> object_redact is the single
+# aggressive retry; consensus_ledger -> object_redact lets the user redact again with new selections.
+GRAPH = {
+    "new": {"intake"},
+    "intake": {"deliberate"},
+    "deliberate": {"object_redact"},
+    "object_redact": {"red_team_attack"},
+    "red_team_attack": {"object_redact", "consensus_ledger"},
+    "consensus_ledger": {"object_redact"},
+}
+
+
+def _advance(job: "Job", state: str, details: dict) -> None:
+    """Move the job along GRAPH and chain a ledger block (types/counts/hashes only; Ledger rejects raw PII)."""
+    if state not in GRAPH.get(job.state, set()):
+        raise HTTPException(409, f"illegal transition {job.state} -> {state}")
+    job.state = state
+    job.ledger.append(f"graph:{state}", state.upper(), details)
+
+
+JOBS: dict[str, Job] = {}
+LOCK = threading.Lock()
+POOL = ThreadPoolExecutor(max_workers=MAX_JOBS, thread_name_prefix="shield-job")
+LLM_CFG = llm.from_env()
+REFERENCES = pdq.HashBank()  # PDQ hashes of user-authorised reference images; pixels are never kept
+REF_LABELS: list[dict] = []
+ENROLLED: list = []  # consented face vectors (int8 SFace), memory only; cleared with the session
+
+
+def _workdir() -> Path:
+    WORK_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return Path(tempfile.mkdtemp(prefix="job-", dir=WORK_ROOT))  # mkdtemp is 0700
+
+
+def _drop(job: Job) -> None:
+    job.cancel.set()
+    shutil.rmtree(job.workdir, ignore_errors=True)
+
+
+def sweep() -> None:
+    now = time.time()
+    with LOCK:
+        expired = [j for j in JOBS.values() if now - j.created > JOB_TTL and j.status not in {"queued", "running"}]
+        for j in expired:
+            JOBS.pop(j.id, None)
+    for j in expired:
+        _drop(j)
+    # orphans from a previous process (crash/restart) are not in JOBS; remove them once they pass the TTL
+    known = {j.workdir for j in JOBS.values()}
+    if WORK_ROOT.exists():
+        for d in WORK_ROOT.glob("job-*"):
+            try:
+                if d not in known and now - d.stat().st_mtime > JOB_TTL:
+                    shutil.rmtree(d, ignore_errors=True)
+            except OSError:
+                pass
+
+
+def _get(job_id: str) -> Job:
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(404, "job not found or expired")
+    return job
+
+
+def _run_stage(job: Job, name: str, fn):
+    if job.cancel.is_set():
+        raise Cancelled()
+    st = Stage(name, "running")
+    job.stages.append(st)
+    t = time.monotonic()
+    try:
+        out = fn()
+        st.status = "done"
+        return out
+    except Cancelled:
+        st.status = "cancelled"
+        raise
+    except Exception as exc:
+        st.status, st.detail = "failed", type(exc).__name__  # exception text may contain document content
+        raise
+    finally:
+        st.ms = int((time.monotonic() - t) * 1000)
+        log.info("job=%s stage=%s status=%s ms=%s", job.id, name, st.status, st.ms)
+
+
+def _submit(job: Job, fn) -> None:
+    with LOCK:
+        active = sum(j.status in {"queued", "running"} for j in JOBS.values())
+        if active >= MAX_PENDING:
+            raise HTTPException(429, "too many jobs in progress; try again shortly")
+        JOBS[job.id] = job
+
+    def wrapper():
+        job.status = "running"
+        try:
+            fn(job)
+            job.status = "ready"
+        except Cancelled:
+            job.status = "cancelled"
+        except Exception as exc:
+            job.status, job.error = "failed", type(exc).__name__
+            log.warning("job=%s failed: %s", job.id, type(exc).__name__)
+
+    POOL.submit(wrapper)
+
+
+# ---------- analysis ----------
+def _evidence(text: str, start: int, end: int, spans: list[tuple[int, int]]) -> str:
+    """Context around a finding; every detected span in the window is masked char-by-char (keeps last 4),
+    so a value cut by the window edge is still masked."""
+    lo, hi = max(0, start - 40), min(len(text), end + 40)
+    chars = list(text[lo:hi])
+    for s, e in spans:
+        keep_from = e - 4 if e - s > 8 else e
+        for i in range(max(s, lo), min(e, hi)):
+            if i < keep_from and chars[i - lo].isalnum():
+                chars[i - lo] = "•"
+    return " ".join("".join(chars).split())
+
+
+def _face_entities(src: Path) -> list[tuple[Entity, str]]:
+    """Face *regions* only (YuNet detection, no recognition), so photos can be removed."""
+    from .. import face
+    from ..profile import extract_images
+
+    out = []
+    for name, img, bbox in extract_images(src):
+        rows = face.detect_faces(img)
+        if not len(rows):
+            continue
+        if src.suffix.lower() == ".pdf" and bbox:
+            x0, y0, x1, y1, pno = bbox  # remove the whole placed photo: pixel->page scaling is not tracked
+            out.append((Entity("FACE", "", 0, 0, 0.9, f"bbox:{x0},{y0},{x1},{y1}@{pno}"), f"page {pno + 1}, photo {name}"))
+        elif src.suffix.lower() in {".png", ".jpg", ".jpeg"}:
+            for r in rows:
+                x, y, w, h = (int(v) for v in r[:4])
+                out.append((Entity("FACE", "", 0, 0, float(r[-1]), f"bbox:{x},{y},{x + w},{y + h}"), f"pixels {x},{y} {w}x{h}"))
+        else:
+            out.append((Entity("FACE", "", 0, 0, 0.9, "media"), f"embedded image {name}"))
+    return out
+
+
+def _analyse(job: Job, src: Path) -> None:
+    from ..profile import layer_texts
+
+    _advance(job, "intake", {"format": job.suffix.lstrip(".") or "txt", "input_sha256": hashlib.sha256(src.read_bytes()).hexdigest()})
+    layers = _run_stage(job, "extract_layers", lambda: layer_texts(src))
+    entities = _run_stage(job, "detect", lambda: [e for n, t in layers.items() for e in detect(t, layer=n)])
+    kept, records = _run_stage(job, "review", lambda: review(entities, layers))
+    job.raw = (entities, layers)
+    rec_by_key = {}
+    ri = iter(records)
+    for e in entities:  # records align with non-FACE entities in order
+        rec_by_key[(e.layer, e.start, e.type)] = next(ri)
+    spans = {n: [(e.start, e.end) for e in entities if e.layer == n] for n in layers}
+
+    faces: list[tuple[Entity, str]] = []
+    if FACE_REGIONS and src.suffix.lower() != ".txt":
+        try:
+            faces = _run_stage(job, "face_regions", lambda: _face_entities(src))
+        except Cancelled:
+            raise
+        except Exception:
+            pass  # stage already recorded as failed; analysis continues without face regions
+    else:
+        job.stages.append(Stage("face_regions", "skipped", "disabled" if not FACE_REGIONS else "text input"))
+
+    findings, ents = [], {}
+    salt = job.id.encode()
+    for e in kept:
+        fid = hashlib.sha256(salt + f"{e.type}|{e.layer}|{e.start}".encode()).hexdigest()[:12]
+        rec = rec_by_key.get((e.layer, e.start, e.type))
+        actions = FILE_ACTIONS.get(job.suffix, ["token", "mask", "remove"]) if e.layer in {"visible", "ocr"} else ["token", "mask", "remove"]
+        findings.append({
+            "id": fid, "type": e.type, "severity": SEVERITY.get(e.type, "medium"), "confidence": round(e.score, 2),
+            "layer": e.layer, "location": {"layer": e.layer, "start": e.start, "end": e.end},
+            "masked": mask_value(e.value), "evidence": _evidence(layers.get(e.layer, ""), e.start, e.end, spans.get(e.layer, [])),
+            "analyzer": f"pattern:{e.type}", "checks": [asdict(c) for c in rec.checks] if rec else [],
+            "recommendation": RECOMMEND.get(e.type, "Review; replace with a token if not needed by the recipient."),
+            "actions": actions,
+        })
+        ents[fid] = e
+    for e, where in faces:
+        fid = hashlib.sha256(salt + e.layer.encode()).hexdigest()[:12]
+        supported = e.layer.startswith("bbox:")
+        findings.append({
+            "id": fid, "type": "FACE", "severity": "high", "confidence": round(e.score, 2), "layer": "image",
+            "location": {"layer": "image", "where": where, "bbox": e.layer.split(":", 1)[1] if supported else None},
+            "masked": "", "evidence": f"face region detected ({where}); no identification performed",
+            "analyzer": "yunet:face_detection", "checks": [],
+            "recommendation": RECOMMEND["FACE"] if supported else "Face redaction is not supported for this format; remove the image manually.",
+            "actions": ["remove"] if supported else [],
+        })
+        ents[fid] = e
+    findings.sort(key=lambda f: (ORDER.get(f["severity"], 9), f["layer"], f["location"].get("start", 0)))
+    job.findings, job.entities = findings, ents
+    counts: dict[str, int] = {}
+    for f in findings:
+        counts[f["type"]] = counts.get(f["type"], 0) + 1
+    _advance(job, "deliberate", {"kept": counts, "dismissed": sum(r.verdict == "dismissed" for r in records)})
+
+
+# ---------- request models ----------
+class Selection(BaseModel):
+    finding_id: str = Field(min_length=1, max_length=64)
+    action: Literal["token", "mask", "remove"]
+
+
+class RedactRequest(BaseModel):
+    selections: list[Selection] = Field(min_length=1, max_length=1000)
+    dry_run: bool = False
+
+
+class DiscoveryRequest(BaseModel):
+    org: str = Field(min_length=2, max_length=100, pattern=r"^[\w .&'-]+$")
+    domain: str = Field(default="", max_length=253, pattern=r"^([a-z0-9-]+\.)*[a-z0-9-]*$")
+    entity_types: list[str] = Field(default_factory=list, max_length=20)
+    crawl: bool = False
+    use_faces: bool = False  # opt-in: also compare crawled faces with the consented enrolment
+    job_id: str | None = None  # block this job's detected values from every query
+
+
+class LLMSettings(BaseModel):
+    provider: Literal["none", "groq", "anthropic"]
+    model: str = Field(default="", max_length=100)
+    endpoint: str = Field(default="", max_length=300)
+    api_key: str = Field(default="", max_length=400)
+    timeout: float = Field(default=20, ge=1, le=120)
+    retries: int = Field(default=2, ge=0, le=5)
+
+    @field_validator("api_key")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return v.strip()
+
+
+class ExplainRequest(BaseModel):
+    job_id: str
+    finding_id: str
+
+
+# ---------- app ----------
+app = FastAPI(
+    title="Shield·Scout API",
+    version="1.0.0",
+    description="Upload, analyse, redact and verify documents; discover candidate leaks. See docs/API.md.",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o for o in os.getenv("SHIELD_CORS_ORIGINS", "http://localhost:5173").split(",") if o],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
+
+@app.middleware("http")
+async def guard(request: Request, call_next):
+    if request.url.path.startswith("/api/"):
+        if API_TOKEN and not secrets.compare_digest(request.headers.get("authorization", ""), f"Bearer {API_TOKEN}"):
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+        sweep()
+    resp = await call_next(request)
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.get("/api/health")
+def health():
+    import shutil as sh
+
+    return {
+        "ok": True,
+        "tools": {"tesseract": bool(sh.which("tesseract")), "pdftotext": bool(sh.which("pdftotext"))},
+        "face_models": YUNET.exists() and SFACE.exists(),
+    }
+
+
+@app.get("/api/config")
+def config():
+    from ..textscout import get_provider
+
+    provider = get_provider()
+    egress = []
+    if LLM_CFG.provider != "none":
+        egress.append(f"LLM explanations: finding type, rule, severity and masked evidence are sent to {LLM_CFG.endpoint}")
+    if provider.name != "offline":
+        egress.append(f"Discovery search: firewall-approved query strings are sent to {provider.name}")
+    egress.append("Discovery crawl (only when requested): HTTP GET requests to registry domains")
+    return {
+        "local_only": LOCAL_ONLY,
+        "limits": {
+            "max_upload_mb": uploads.MAX_UPLOAD_BYTES // (1024 * 1024), "max_text_chars": uploads.MAX_TEXT_CHARS,
+            "max_pdf_pages": uploads.MAX_PDF_PAGES, "allowed": sorted(uploads.SUFFIXES), "job_ttl_seconds": JOB_TTL,
+            "max_concurrent_jobs": MAX_JOBS, "crawl_max_pages": CRAWL_MAX_PAGES, "crawl_max_depth": CRAWL_MAX_DEPTH,
+        },
+        "search_provider": provider.name,
+        "llm": LLM_CFG.public(),
+        "data_leaving_machine": egress,
+        "face_regions": FACE_REGIONS,
+    }
+
+
+@app.post("/api/jobs", status_code=202)
+async def create_job(file: UploadFile | None = File(None), text: str | None = Form(None)):
+    if (file is None) == (text is None):
+        raise HTTPException(422, "send exactly one of 'file' or 'text'")
+    if file is not None:
+        data = await file.read(uploads.MAX_UPLOAD_BYTES + 1)
+        name = file.filename or ""
+    else:
+        data, name = text.encode("utf-8"), "pasted.txt"
+    try:
+        suffix = uploads.validate(name, data)
+    except uploads.UploadError as exc:
+        raise HTTPException(422, str(exc)) from None
+    job = Job(uuid.uuid4().hex, "analysis", time.time(), _workdir(), suffix=suffix,
+              display_name="pasted text" if file is None else Path(name).name[:120])
+    src = job.workdir / f"input{suffix}"  # never the client's filename
+    src.write_bytes(data)
+    job.stages.append(Stage("validate", "done", f"{len(data)} bytes"))
+    _submit(job, lambda j: _analyse(j, src))
+    return {"id": job.id}
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str):
+    return _get(job_id).public()
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    job = _get(job_id)
+    job.cancel.set()
+    return {"id": job.id, "status": job.status, "cancel_requested": True}
+
+
+@app.delete("/api/jobs/{job_id}")
+def delete_job(job_id: str):
+    with LOCK:
+        job = JOBS.pop(job_id, None)
+    if not job:
+        raise HTTPException(404, "job not found or expired")
+    _drop(job)
+    return {"deleted": job_id}
+
+
+@app.delete("/api/session")
+def clear_session():
+    global LLM_CFG
+    with LOCK:
+        jobs = list(JOBS.values())
+        JOBS.clear()
+    for j in jobs:
+        _drop(j)
+    REFERENCES._rows.clear()
+    REF_LABELS.clear()
+    ENROLLED.clear()
+    LLM_CFG = llm.from_env()  # forget any runtime key
+    return {"cleared_jobs": len(jobs)}
+
+
+def _selected(job: Job, req: RedactRequest) -> list[Entity]:
+    out = []
+    for sel in req.selections:
+        e = job.entities.get(sel.finding_id)
+        if e is None:
+            raise HTTPException(422, f"unknown finding {sel.finding_id}")
+        f = next(f for f in job.findings if f["id"] == sel.finding_id)
+        if sel.action not in f["actions"]:
+            raise HTTPException(422, f"action '{sel.action}' not available for finding {sel.finding_id}")
+        out.append(Entity(e.type, e.value, e.start, e.end, e.score, e.layer, sel.action))
+    return out
+
+
+@app.post("/api/jobs/{job_id}/redact")
+def redact_job(job_id: str, req: RedactRequest):
+    job = _get(job_id)
+    if job.status != "ready" or job.kind != "analysis":
+        raise HTTPException(409, f"job is {job.status}; analysis must finish first")
+    ents = _selected(job, req)
+    src = job.workdir / f"input{job.suffix}"
+
+    if req.dry_run:
+        if job.suffix == ".txt":
+            return {"dry_run": True, "preview_text": redact_text(src.read_text(encoding="utf-8"), ents)[:20000]}
+        plan = [{"finding_id": s.finding_id, "type": e.type, "layer": e.layer, "masked": mask_value(e.value) if e.value else "",
+                 "replacement": "opaque fill" if job.suffix in FILE_ACTIONS or e.type == "FACE" else replacement(e, e.value)}
+                for s, e in zip(req.selections, ents)]
+        return {"dry_run": True, "plan": plan, "note": "Metadata, comments and embedded files are also removed when applied."}
+
+    out_dir = job.workdir / "out"
+    shutil.rmtree(out_dir, ignore_errors=True)
+    t = time.monotonic()
+    actions: dict[str, int] = {}
+    for e in ents:
+        actions[f"{e.type}:{e.action}"] = actions.get(f"{e.type}:{e.action}", 0) + 1
+    _advance(job, "object_redact", {"selected": actions, "aggressive": False})
+    out = redact(src, ents, out_dir)
+    originals = [e.value for e in ents if e.value]
+    attacks = verify.attack(out, originals)
+    _advance(job, "red_team_attack", {a.name: a.passed for a in attacks})
+    retried = False
+    if not all(a.passed for a in attacks) and job.suffix != ".txt":
+        retried = True
+        _advance(job, "object_redact", {"selected": actions, "aggressive": True})
+        out = redact(src, ents, out_dir, aggressive=True)
+        attacks = verify.attack(out, originals)
+        _advance(job, "red_team_attack", {a.name: a.passed for a in attacks})
+    clean = all(a.passed for a in attacks)
+    _advance(job, "consensus_ledger", {"status": "CLEAN" if clean else "FAILED", "output_sha256": hashlib.sha256(out.read_bytes()).hexdigest()})
+    preview = ""
+    try:
+        preview = verify._extract_text(out)[:20000]
+    except Exception:
+        preview = "(preview unavailable: text extraction failed)"
+    job.redaction = {
+        "status": "CLEAN" if clean else "FAILED",
+        "checks": [asdict(a) for a in attacks],
+        "retried_aggressive": retried,
+        "selected": len(ents),
+        "output_name": f"sanitized{job.suffix}",
+        "sha256": hashlib.sha256(out.read_bytes()).hexdigest(),
+        "preview_text": preview,
+        "has_preview_image": job.suffix in {".pdf", ".png", ".jpg", ".jpeg"},
+        "ms": int((time.monotonic() - t) * 1000),
+        "note": "Original preserved. Download is only enabled when every check passed.",
+        "ledger_head": job.ledger.blocks[-1]["current_hash"],
+        "ledger_valid": job.ledger.verify() is None,
+    }
+    job.stages.append(Stage("redact+verify", "done" if clean else "failed", job.redaction["status"], job.redaction["ms"]))
+    return job.redaction
+
+
+def _output(job: Job) -> Path:
+    out = job.workdir / "out" / f"input_sanitized{job.suffix}"
+    if not job.redaction or not out.exists():
+        raise HTTPException(404, "no sanitized output yet")
+    return out
+
+
+@app.get("/api/jobs/{job_id}/download")
+def download(job_id: str):
+    job = _get(job_id)
+    out = _output(job)
+    if job.redaction["status"] != "CLEAN":
+        raise HTTPException(409, "verification failed; sanitized output withheld")
+    return FileResponse(out, filename=job.redaction["output_name"], content_disposition_type="attachment")
+
+
+@app.get("/api/jobs/{job_id}/preview.png")
+def preview_png(job_id: str):
+    import pymupdf
+    from PIL import Image
+
+    job = _get(job_id)
+    out = _output(job)
+    if job.suffix == ".pdf":
+        with pymupdf.open(out) as doc:
+            data = doc[0].get_pixmap(dpi=80).tobytes("png")
+    elif job.suffix in {".png", ".jpg", ".jpeg"}:
+        img = Image.open(out).convert("RGB")
+        img.thumbnail((1200, 1200))
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        data = buf.getvalue()
+    else:
+        raise HTTPException(404, "no image preview for this format")
+    return Response(data, media_type="image/png")
+
+
+@app.post("/api/jobs/{job_id}/fingerprint")
+def fingerprint(job_id: str):
+    import cv2
+    import numpy as np
+
+    job = _get(job_id)
+    if job.suffix not in {".png", ".jpg", ".jpeg"}:
+        raise HTTPException(422, "fingerprints are computed for image inputs")
+    img = cv2.imdecode(np.frombuffer((job.workdir / f"input{job.suffix}").read_bytes(), np.uint8), cv2.IMREAD_COLOR)
+    regions = pdq.pdq_regions(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    return {
+        "pdq": [asdict(r) for r in regions],
+        "note": "A PDQ fingerprint is for matching copies of this image. It is not redaction and does not sanitize the original.",
+    }
+
+
+@app.post("/api/references")
+async def add_reference(file: UploadFile = File(...), label: str = Form("reference", max_length=60), authorized: bool = Form(False)):
+    import cv2
+    import numpy as np
+
+    if not authorized:
+        raise HTTPException(422, "confirm you are authorised to use this image for matching")
+    data = await file.read(uploads.MAX_UPLOAD_BYTES + 1)
+    try:
+        uploads.validate(file.filename or "", data)
+    except uploads.UploadError as exc:
+        raise HTTPException(422, str(exc)) from None
+    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(422, "references must be PNG or JPEG images")
+    rid = uuid.uuid4().hex[:8]
+    REFERENCES.add_reference(rid, label, cv2.cvtColor(img, cv2.COLOR_BGR2RGB), [])
+    del img, data  # only PDQ hashes are retained
+    REF_LABELS.append({"id": rid, "label": label})
+    return {"id": rid, "label": label, "stored": "PDQ hashes only (8 dihedral × regions); image discarded"}
+
+
+@app.get("/api/references")
+def list_references():
+    return {"references": REF_LABELS, "hash_rows": len(REFERENCES)}
+
+
+# ---------- discovery ----------
+def _discover(job: Job, req: DiscoveryRequest, blocked_values: list[str]) -> None:
+    from ..textscout import build_queries, firewall, get_provider
+
+    cfg = LLM_CFG if not LOCAL_ONLY else llm.LLMConfig()
+    queries = _run_stage(job, "build_queries", lambda: build_queries(req.org, req.entity_types, req.domain, cfg))
+    checked = _run_stage(job, "privacy_firewall", lambda: [{"query": q, "allowed": firewall(q, blocked_values)} for q in queries])
+    provider = get_provider()
+    results: list[dict] = []
+    job.discovery = {"provider": provider.name, "queries": checked, "results": results, "crawl": None}
+
+    def run_search():
+        for q in [c["query"] for c in checked if c["allowed"]]:
+            if job.cancel.is_set():
+                raise Cancelled()
+            try:
+                hits = provider.search(q)
+            except Exception as exc:
+                job.stages[-1].detail = f"{provider.name} error: {type(exc).__name__}"
+                continue
+            for h in hits:
+                excerpt = h.get("snippet", "")
+                for e in detect(excerpt):
+                    excerpt = excerpt.replace(e.value, mask_value(e.value))
+                results.append({
+                    "source_url": h.get("url", ""), "title": h.get("title", "")[:200], "excerpt": excerpt[:300],
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "match_type": "text_search",
+                    "score": None, "evidence_status": "candidate: needs human review", "query": q,
+                    "provider": h.get("provider", provider.name), "tier": h.get("tier"),
+                })
+
+    _run_stage(job, f"search:{provider.name}", run_search)
+    job.ledger.append("scout", "SEARCH", {"provider": provider.name, "queries": len(checked),
+                                          "blocked": sum(not c["allowed"] for c in checked), "results": len(results)})
+
+    if not req.crawl:
+        job.stages.append(Stage("crawl", "skipped", "not requested"))
+        return
+    faces = req.use_faces and bool(ENROLLED)
+    if not len(REFERENCES) and not faces:
+        job.stages.append(Stage("crawl", "skipped", "no reference images or face enrolment"))
+        return
+    _run_stage(job, "crawl+match", lambda: asyncio.run(_crawl(job, results, faces)))
+    job.ledger.append("scout", "CRAWL", {k: v for k, v in (job.discovery["crawl"] or {}).items()})
+
+
+async def _crawl(job: Job, results: list[dict], use_faces: bool = False) -> None:
+    from ..crawl import Job as CrawlJob, Scheduler
+    from ..matcher import Matcher
+    from ..net import Fetcher
+    from ..registry import load_registry
+
+    fetcher = Fetcher()
+    # face vectors only when the user enrolled with consent + selfie and asked for it
+    matcher = Matcher(list(ENROLLED) if use_faces else [], REFERENCES)
+    sched = Scheduler(rps_per_domain=CRAWL_RPS, global_concurrency=4, budget_pages=CRAWL_MAX_PAGES, max_depth=CRAWL_MAX_DEPTH)
+    for row in load_registry(REGISTRY):
+        for url in row.get("entry_urls", []):
+            sched.push(row.get("tier", 2), 0.5, CrawlJob(url, "page", 0, row["domain"], seed_category=row["category"]))
+
+    async def on_image(ref):
+        m = await matcher.on_image(ref, fetcher)
+        if m:
+            results.append({
+                "source_url": m.page_url, "image_url": m.image_url, "title": "", "excerpt": "",
+                "timestamp": m.discovered_at, "match_type": f"{m.kind}:{m.region}", "score": m.pdq_distance,
+                "similarity": m.similarity, "id": m.id, "kind": m.kind, "pdq_distance": m.pdq_distance,
+                "thumb_b64": base64.b64encode(m.thumb_jpeg).decode(),  # 128 px, Gaussian radius 25: for review, not redaction
+                "evidence_status": f"confirmed: {m.kind} strong match" if m.verdict == "confirmed" else "candidate: needs human review",
+            })
+
+    async def on_event(ev):
+        pass
+
+    task = asyncio.create_task(sched.run(fetcher, on_image, on_event))
+    deadline = time.monotonic() + CRAWL_TIMEOUT
+    while not task.done():
+        if job.cancel.is_set() or time.monotonic() > deadline:
+            task.cancel()
+            break
+        await asyncio.sleep(0.2)
+    try:
+        counters = await task
+    except asyncio.CancelledError:
+        counters = dict(sched.counters, stopped="cancelled" if job.cancel.is_set() else "timeout")
+    job.discovery["crawl"] = counters
+    if job.cancel.is_set():
+        raise Cancelled()
+
+
+@app.post("/api/discovery", status_code=202)
+def start_discovery(req: DiscoveryRequest):
+    blocked: list[str] = []
+    if req.job_id:
+        # personal values are blocked; org/date context is what discovery is meant to search for
+        blocked = [e.value for e in _get(req.job_id).entities.values() if e.value and e.type not in {"ORG", "DATE_TIME"}]
+    job = Job(uuid.uuid4().hex, "discovery", time.time(), _workdir(), display_name=f"discovery: {req.org}")
+    _submit(job, lambda j: _discover(j, req, blocked))
+    return {"id": job.id}
+
+
+# ---------- LLM provider ----------
+@app.get("/api/llm")
+def get_llm():
+    return {**LLM_CFG.public(), "local_only": LOCAL_ONLY, "providers": list(llm.PROVIDERS)}
+
+
+@app.put("/api/llm")
+def set_llm(body: LLMSettings):
+    global LLM_CFG
+    if LOCAL_ONLY and body.provider != "none":
+        raise HTTPException(403, "local-only mode: remote LLM providers are disabled")
+    try:
+        LLM_CFG = llm.configure(LLM_CFG, **body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    return LLM_CFG.public()  # never echoes the key
+
+
+@app.post("/api/llm/test")
+def test_llm():
+    if LLM_CFG.provider == "none":
+        raise HTTPException(409, "no provider configured")
+    return llm.test_connection(LLM_CFG)
+
+
+@app.post("/api/llm/explain")
+def explain(req: ExplainRequest):
+    job = _get(req.job_id)
+    f = next((f for f in job.findings if f["id"] == req.finding_id), None)
+    if not f:
+        raise HTTPException(404, "finding not found")
+    try:
+        return llm.explain(LLM_CFG, {**f, "rule": f["type"]})
+    except llm.LLMError as exc:
+        raise HTTPException(502, str(exc)) from None
+
+
+WEB_DIST = BASE / "web/dist"
+
+
+def mount_web() -> None:
+    """Mount the built React app last: a mount at "/" would shadow routes registered after it."""
+    if WEB_DIST.exists():
+        app.mount("/", StaticFiles(directory=WEB_DIST, html=True), name="web")
+
+
+def main() -> None:
+    import uvicorn
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    uvicorn.run(app, host=os.getenv("SHIELD_HOST", "127.0.0.1"), port=int(os.getenv("SHIELD_PORT", "8000")))
+
+
+if __name__ == "__main__":
+    main()

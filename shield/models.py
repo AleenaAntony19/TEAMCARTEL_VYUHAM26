@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 BASE = Path(__file__).resolve().parent.parent
 MODELS = BASE / "models"
@@ -18,6 +17,7 @@ class Entity:
     end: int
     score: float
     layer: str = "visible"
+    action: str = "token"  # token | mask | remove; see detect.replacement
 
 
 @dataclass

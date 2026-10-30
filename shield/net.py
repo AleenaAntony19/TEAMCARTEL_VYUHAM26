@@ -3,7 +3,6 @@ from __future__ import annotations
 import ipaddress
 import os
 import socket
-from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -14,6 +13,16 @@ from .models import FetchResult
 UA = "ShieldScoutBot/1.0 (+contact: local-demo)"
 
 
+def ip_allowed(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip.split("%")[0])
+    except ValueError:
+        return False
+    if addr.is_loopback and os.getenv("SHIELD_ALLOW_LOCAL") == "1":
+        return True
+    return addr.is_global
+
+
 def is_public(host: str) -> bool:
     if not host:
         return False
@@ -21,18 +30,15 @@ def is_public(host: str) -> bool:
         addrs = socket.getaddrinfo(host, None)
     except socket.gaierror:
         return False
-    allow_local = os.getenv("SHIELD_ALLOW_LOCAL") == "1"
-    for info in addrs:
-        ip = info[4][0]
-        try:
-            addr = ipaddress.ip_address(ip)
-        except ValueError:
-            return False
-        if addr.is_loopback and allow_local:
-            continue
-        if not addr.is_global:
-            return False
-    return True
+    return all(ip_allowed(info[4][0]) for info in addrs)
+
+
+def _peer_ip(resp: httpx.Response) -> str | None:
+    stream = resp.extensions.get("network_stream")
+    if stream is None:
+        return None
+    addr = stream.get_extra_info("server_addr")
+    return addr[0] if addr else None
 
 
 class Fetcher:
@@ -78,6 +84,10 @@ class Fetcher:
 
             try:
                 async with self._client.stream("GET", current) as resp:
+                    # DNS can change between is_public() and connect (rebinding): check the IP we actually reached
+                    peer = _peer_ip(resp)
+                    if peer is not None and not ip_allowed(peer):
+                        return FetchResult(0, {}, b"", current, "private_ip")
                     if resp.status_code in {301, 302, 303, 307, 308}:
                         loc = resp.headers.get("location")
                         if not loc:
@@ -90,11 +100,12 @@ class Fetcher:
                     if resp.status_code == 429:
                         return FetchResult(429, dict(resp.headers), b"", current, "http_429")
 
-                    body = b""
+                    buf = bytearray()
                     async for chunk in resp.aiter_bytes():
-                        body += chunk
-                        if len(body) > self.max_bytes:
+                        buf += chunk
+                        if len(buf) > self.max_bytes:
                             return FetchResult(resp.status_code, dict(resp.headers), b"", current, "too_large")
+                    body = bytes(buf)
 
                     text_head = body[:4096].decode("utf-8", "ignore").lower()
                     if resp.status_code in {403, 503} and ("captcha" in text_head or "cf-chl" in text_head):
@@ -108,7 +119,7 @@ class Fetcher:
             except Exception as exc:
                 return FetchResult(0, {}, b"", current, error=str(exc))
 
-        return FetchResult(0, {}, b"", current, "private_ip")
+        return FetchResult(0, {}, b"", current, "too_many_redirects")
 
     async def guard_route(self, route):
         url = str(route.request.url)

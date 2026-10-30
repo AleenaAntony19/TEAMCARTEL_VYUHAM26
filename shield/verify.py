@@ -8,32 +8,27 @@ import pymupdf
 import pytesseract
 from PIL import Image
 
-from .detect import PATTERNS, detect, variants
+from .detect import detect, variants
 from .models import AttackResult
 from .redact.docx import ooxml_text
 
 
 def _extract_text(path: Path) -> str:
+    """Independent extraction. Raises if the extractor cannot run: an empty string must never mean 'clean'."""
     suffix = path.suffix.lower()
     if suffix == ".pdf":
         try:
-            return subprocess.run(
-                ["pdftotext", "-layout", str(path), "-"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            ).stdout
-        except Exception:
-            doc = pymupdf.open(path)
+            res = subprocess.run(["pdftotext", "-layout", str(path), "-"], capture_output=True, text=True, timeout=30, check=False)
+            if res.returncode == 0:
+                return res.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        with pymupdf.open(path) as doc:  # pdftotext missing or failed: second, different extractor
             return "".join(p.get_text() for p in doc)
     if suffix in {".docx", ".xlsx"}:
         return ooxml_text(path)
     if suffix in {".jpg", ".jpeg", ".png"}:
-        try:
-            return pytesseract.image_to_string(Image.open(path))
-        except Exception:
-            return ""
+        return pytesseract.image_to_string(Image.open(path))
     return path.read_bytes().decode("utf-8", "ignore")
 
 
@@ -103,23 +98,28 @@ def attack(path: str | Path, originals: list[str]) -> list[AttackResult]:
     path = Path(path)
     results: list[AttackResult] = []
 
-    text = _extract_text(path)
+    try:
+        text = _extract_text(path)
+    except Exception as exc:
+        results.append(AttackResult("text_extraction", False, [f"check could not run ({type(exc).__name__}); not verified"]))
+        text = None
 
     # 1. text extraction
     hits = 0
-    for original in originals:
-        if any(v in text for v in variants(original)):
-            hits += 1
-    for ent in detect(text):
-        if any(ent.value == original for original in originals):
-            hits += 1
-    results.append(
-        AttackResult(
-            "text_extraction",
-            hits == 0,
-            [] if hits == 0 else [f"{hits} original value(s) recoverable from text"],
+    if text is not None:
+        for original in originals:
+            if any(v in text for v in variants(original)):
+                hits += 1
+        for ent in detect(text):
+            if any(ent.value == original for original in originals):
+                hits += 1
+        results.append(
+            AttackResult(
+                "text_extraction",
+                hits == 0,
+                [] if hits == 0 else [f"{hits} original value(s) recoverable from text"],
+            )
         )
-    )
 
     # 2. binary grep (decompressed)
     blob = _binary(path)
@@ -136,7 +136,11 @@ def attack(path: str | Path, originals: list[str]) -> list[AttackResult]:
     )
 
     # 3. metadata
-    bad = _metadata_bad(path)
+    try:
+        bad = _metadata_bad(path)
+    except Exception as exc:
+        results.append(AttackResult("metadata", False, [f"check could not run ({type(exc).__name__}); not verified"]))
+        return results
     results.append(
         AttackResult(
             "metadata",

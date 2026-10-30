@@ -1,4 +1,3 @@
-from pathlib import Path
 
 import pytest
 
@@ -9,9 +8,9 @@ from shield import verify
 
 
 def test_aadhaar_verhoeff():
-    assert verhoeff_valid("2345 6789 0128")
+    assert verhoeff_valid("2345 6789 0124")
     assert not verhoeff_valid("2345 6789 0120")
-    assert [e.type for e in detect("Aadhaar: 2345 6789 0128")] == ["IN_AADHAAR"]
+    assert [e.type for e in detect("Aadhaar: 2345 6789 0124")] == ["IN_AADHAAR"]
     assert not [e for e in detect("Aadhaar: 2345 6789 0120") if e.type == "IN_AADHAAR"]
 
 
@@ -28,7 +27,7 @@ def test_bank_account_needs_context():
 
 def test_person_and_variants():
     assert any(e.type == "PERSON" and e.value == "Ravi Kumar" for e in detect("Employee Ravi Kumar joined"))
-    assert {"2345 6789 0128", "234567890128"} <= variants("2345 6789 0128")
+    assert {"2345 6789 0124", "234567890124"} <= variants("2345 6789 0124")
 
 
 def test_severity():
@@ -36,7 +35,7 @@ def test_severity():
 
     name = [Entity("PERSON", "Ravi Kumar", 0, 10, 0.7)]
     mobile = name + [Entity("MOBILE_IN", "+91 98765 43210", 11, 28, 0.85)]
-    aadhaar = mobile + [Entity("IN_AADHAAR", "2345 6789 0128", 29, 43, 0.99)]
+    aadhaar = mobile + [Entity("IN_AADHAAR", "2345 6789 0124", 29, 43, 0.99)]
     assert severity(name)[1] == "LOW"
     assert severity(mobile)[1] == "HIGH"
     assert severity(aadhaar)[1] == "CRITICAL"
@@ -55,7 +54,7 @@ def test_ledger_chain_and_pii_guard():
     bad[2]["details"]["i"] = 999
     assert led.verify(bad) == 2
     with pytest.raises(ValueError):
-        led.append("test", "ACT", {"note": "2345 6789 0128"})
+        led.append("test", "ACT", {"note": "2345 6789 0124"})
     with pytest.raises(ValueError):
         led.append("test", "ACT", {"vec": [0.1] * 128})
 
@@ -82,3 +81,13 @@ def test_naive_pdf_fails_text_attack(fx, tmp_path):
     results = verify.attack(fx["naive_pdf"], originals)
     assert any(r.name == "text_extraction" and not r.passed for r in results)
 
+
+
+def test_ledger_allows_hashes_but_not_pii():
+    from shield.ledger import Ledger
+
+    led = Ledger()
+    led.append("t", "OK", {"sha256": "ab" * 4 + "9876543210" + "c" * 46})  # digit run inside a digest
+    with pytest.raises(ValueError):
+        led.append("t", "BAD", {"note": "call +91 98765 43210"})
+    assert led.verify() is None

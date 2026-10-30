@@ -30,8 +30,12 @@ def scan_config(root: Path) -> list[Finding]:
     if not gitignore.exists() or ".env" not in gitignore.read_text(errors="ignore"):
         out.append(Finding(fingerprint("GITIGNORE_MISSING_ENV", ".gitignore", ".env", ".env"), "config", "GITIGNORE_MISSING_ENV", "medium", ".gitignore", 0, 0, 0, 0, ".gitignore does not ignore .env", "", ["gitignore_add", "ignore"]))
 
+    from . import SKIP_DIRS
+
     for path in root.rglob("settings*.py"):
         rel = path.relative_to(root).as_posix()
+        if SKIP_DIRS.intersection(rel.split("/")):
+            continue
         for i, line in enumerate(path.read_text(errors="ignore").splitlines(), 1):
             if "DEBUG" in line and "True" in line:
                 out.append(Finding(fingerprint("DEBUG_TRUE_DJANGO", rel, line, "True"), "config", "DEBUG_TRUE_DJANGO", "high", rel, i, 0, i, 0, "Django DEBUG=True", "", ["ignore"]))

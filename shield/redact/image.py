@@ -57,18 +57,37 @@ def _ocr_lines(path: str | Path):
     return [((" ".join(t for t, _ in words)), words) for words in lines.values()]
 
 
-def _fill_entity(draw, line_text: str, words, variant: str, pad: int) -> bool:
-    idx = line_text.find(variant)
-    if idx < 0:
+def _alnum(s: str) -> str:
+    return "".join(c for c in s if c.isalnum()).upper()
+
+
+def _close(a: str, b: str) -> bool:
+    # OCR runs disagree on single glyphs (3 vs 8); allow a few substitutions on long values only
+    if len(a) != len(b):
         return False
-    pos = 0
-    for wt, (x, y, w, h) in words:
-        start = pos
-        end = pos + len(wt)
-        if not (end <= idx or start >= idx + len(variant)):
-            draw.rectangle([x - pad, y - pad, x + w + pad, y + h + pad], fill=(0, 0, 0))
-        pos = end + 1
-    return True
+    budget = 2 if len(b) >= 8 else 0
+    return sum(x != y for x, y in zip(a, b)) <= budget
+
+
+def _fill_entity(draw, line_text: str, words, variant: str, pad: int) -> bool:
+    """Fill every run of consecutive OCR words whose alphanumerics match `variant`."""
+    target = _alnum(variant)
+    if not target:
+        return False
+    hit = False
+    for i in range(len(words)):
+        acc = ""
+        for j in range(i, min(i + 6, len(words))):
+            acc += _alnum(words[j][0])
+            if len(acc) > len(target) + 2:
+                break
+            # allow stray punctuation-like glyphs at the ends (e.g. "Aadhaar." glued to digits)
+            if any(_close(acc[k : k + len(target)], target) for k in range(0, len(acc) - len(target) + 1)):
+                for _, (x, y, w, h) in words[i : j + 1]:
+                    draw.rectangle([x - pad, y - pad, x + w + pad, y + h + pad], fill=(0, 0, 0))
+                hit = True
+                break
+    return hit
 
 
 def redact_image(
@@ -100,16 +119,15 @@ def redact_image(
                 if any(v in line_text for v in variants(e.value)):
                     for _, (x, y, w, h) in words:
                         draw.rectangle([x - 4, y - 4, x + w + 4, y + h + 4], fill=(0, 0, 0))
-                    break
         else:
+            # every line, not just the first hit: a value can appear more than once
             for line_text, words in lines:
-                if any(_fill_entity(draw, line_text, words, v, 0) for v in variants(e.value)):
-                    break
+                any(_fill_entity(draw, line_text, words, v, 0) for v in variants(e.value))
 
-    suffix = out.suffix.lower()
-    if suffix in {".jpg", ".jpeg"}:
-        clean.save(out, "JPEG", quality=95)
+    # fresh image without exif/pnginfo/iptc; format follows the output suffix (jpg, png, webp, tiff)
+    if out.suffix.lower() in {".jpg", ".jpeg", ".webp"}:
+        clean.save(out, quality=95)
     else:
-        clean.save(out, "PNG")
+        clean.save(out)
     return out
 
