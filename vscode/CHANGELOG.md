@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2
+- Fix README images on the store pages.
+- License: AGPL-3.0.
+
 ## 0.5.1
 - Release builds now compile the extension. First Open VSX release.
 

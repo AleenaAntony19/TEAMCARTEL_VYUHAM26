@@ -112,3 +112,7 @@ See [SECURITY.md](SECURITY.md) for the threat model, the dev-only deployment ass
 - web: unit tests and build;
 - extension: typecheck, unit tests and build;
 - the mock-web scout run.
+
+## License
+
+[AGPL-3.0](LICENSE). The engine and web API use PyMuPDF, which is AGPL-3.0 licensed. Other dependencies are MIT, BSD or Apache-2.0.

@@ -2,7 +2,7 @@
 
 Find secrets, Indian PII, unsafe code, risky config and sensitive images or documents in your workspace. Review every fix before it is applied. Detection runs on your machine.
 
-![Findings tree and quick fixes in VS Code](media/quick_fix.png)
+![Findings tree and quick fixes in VS Code](https://raw.githubusercontent.com/AleenaAntony19/TEAMCARTEL_VYUHAM26/main/vscode/media/quick_fix.png)
 
 ## What it finds
 
@@ -20,21 +20,21 @@ Values are masked in every view. A value that is labelled as an ID but fails its
 
 Every fix opens a preview and changes nothing until you press **Apply**. Redacting an image replaces the text with an opaque fill, strips metadata, and keeps the original in `.shield/backup/`.
 
-![Fix preview dialog](media/fix_preview_dialog.png)
+![Fix preview dialog](https://raw.githubusercontent.com/AleenaAntony19/TEAMCARTEL_VYUHAM26/main/vscode/media/fix_preview_dialog.png)
 
 Right-click a finding for **Fix…** and **Why flagged**.
 
-![Why flagged log](media/why_flagged.png)
+![Why flagged log](https://raw.githubusercontent.com/AleenaAntony19/TEAMCARTEL_VYUHAM26/main/vscode/media/why_flagged.png)
 
 ## Optional AI (Groq or Claude)
 
 Bring your own key in the **AI Provider** panel. Keys stay in VS Code Secret Storage.
 
-![AI Provider panel connected](media/ai_provider.png)
+![AI Provider panel connected](https://raw.githubusercontent.com/AleenaAntony19/TEAMCARTEL_VYUHAM26/main/vscode/media/ai_provider.png)
 
 **Shield: AI Deep Scan** (✨) finds what no rule covers, such as a diagnosis or a home address. It asks every time, and it is the one feature that sends file text out of your machine:
 
-![Deep scan consent dialog](media/deep_scan_consent.png)
+![Deep scan consent dialog](https://raw.githubusercontent.com/AleenaAntony19/TEAMCARTEL_VYUHAM26/main/vscode/media/deep_scan_consent.png)
 
 AI results are opinions, not verified matches. They can miss things, so they only add to the rule-based findings.
 
@@ -57,3 +57,7 @@ Search **Shield·Code** in the Extensions view of VSCodium, Cursor or Antigravit
 
 ## Development
 `npm run typecheck`, `npm test` (pure helpers, `node --test`), `npm run build`, `npm run package`. The extension was not exercised inside a live VS Code instance by the automated checks; see the main README for what is tested.
+
+## License
+
+AGPL-3.0. The bundled engine includes PyMuPDF, which is AGPL-3.0 licensed, so the whole package uses that license. Source: [GitHub](https://github.com/AleenaAntony19/TEAMCARTEL_VYUHAM26).

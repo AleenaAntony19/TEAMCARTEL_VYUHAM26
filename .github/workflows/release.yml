@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag like v0.5.1 (must equal vscode/package.json "version").
+# Push a tag like v0.5.2 (must equal vscode/package.json "version").
 on:
   push:
     tags: ["v*"]
