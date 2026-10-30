@@ -174,3 +174,4 @@ sequenceDiagram
 | **Private IP SSRF Attempt** | `QueryFirewall` / `Fetcher` | Route abort triggered; domain added to `blocked` set; ledger logs `BLOCKED_MANUAL_CHECK`. |
 | **Red-Team Attack Failure** | `RedTeamAttacker` | File is refused for export; pipeline re-triggers aggressive rasterization and deep stream purge. |
 | **Tampered Ledger Chain** | `Ledger.verify()` | Immediate UI warning; identifies corrupted block sequence number; prevents Section 63 BSA dossier signing. |
+
