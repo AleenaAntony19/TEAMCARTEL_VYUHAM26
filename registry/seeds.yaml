@@ -1,0 +1,56 @@
+- domain: 127.0.0.1
+  category: forum
+  tier: 1
+  enabled: true
+  entry_urls:
+    - http://127.0.0.1:8765/forum/
+  notes: "mock leak web — forum"
+
+- domain: 127.0.0.1
+  category: gallery
+  tier: 1
+  enabled: true
+  entry_urls:
+    - http://127.0.0.1:8765/gallery/
+  notes: "mock leak web — lazy gallery"
+
+- domain: 127.0.0.1
+  category: directory
+  tier: 1
+  enabled: true
+  entry_urls:
+    - http://127.0.0.1:8765/directory/
+  notes: "mock leak web — directory"
+
+- domain: 127.0.0.1
+  category: paste
+  tier: 1
+  enabled: true
+  entry_urls:
+    - http://127.0.0.1:8765/paste/
+  notes: "mock leak web — text dump"
+
+- domain: 127.0.0.1
+  category: mirror
+  tier: 1
+  enabled: true
+  entry_urls:
+    - http://127.0.0.1:8765/blog/
+  notes: "mock leak web — blog"
+
+- domain: 127.0.0.1
+  category: image_host
+  tier: 2
+  enabled: true
+  entry_urls:
+    - http://127.0.0.1:8765/
+  notes: "mock leak web — root"
+
+# Real-world entries intentionally ship disabled until legal review.
+# - domain: example-leak-site.tld
+#   category: forum
+#   tier: 1
+#   enabled: false
+#   entry_urls: []
+#   notes: "disabled pending legal review"
+

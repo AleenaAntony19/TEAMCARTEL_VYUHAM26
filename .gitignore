@@ -1,0 +1,13 @@
+models/
+demo/out/
+demo/mockweb/
+demo/leaky_repo/
+.shield/backup/
+demo/face_threshold.json
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+dist/
+demo/leak_bank.json
+
