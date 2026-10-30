@@ -17,7 +17,7 @@ The original Streamlit demo (`app.py`) still runs (`streamlit run app.py`) for t
 ## Quick start
 
 ```bash
-source /Users/aaronr/py311/bin/activate          # or any Python 3.11 env
+python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 brew install tesseract poppler                    # OCR + pdftotext (used by verification)
 bash scripts/get_models.sh                        # YuNet/SFace ONNX models (face *region* detection)
@@ -88,16 +88,10 @@ What is sent: finding type, rule, severity, confidence, layer and **masked** evi
 
 See [SECURITY.md](SECURITY.md) for the threat model, the dev-only deployment assumptions and the exact list of data that can leave the machine. In short: local-only mode (`SHIELD_LOCAL_ONLY=1`) disables every remote LLM/search call; uploads live in per-job `0700` temp dirs deleted on job delete, session clear or TTL; logs record job id, stage and status only.
 
-## Build, CI and release
+## Build and release (local, no CI)
 
-- **CI** (`.github/workflows/ci.yml`): runs `scripts/validate.sh` plus a secret scan on every push and PR.
-- **Engine**: `python engine/build.py`, using `requirements-engine.txt`, builds `dist/shield-engine/`. It is a standalone PyInstaller bundle: the codescan CLI, the MCP stdio server, the LLM helper and bandit. `python scripts/smoke_engine.py dist/shield-engine` checks it.
-- **Release** (`.github/workflows/release.yml`): push a tag `vX.Y.Z` that equals `vscode/package.json` version. It then:
-  - builds the engine on Windows, macOS arm64 and Linux; the Windows build bundles Tesseract;
-  - smoke-tests each engine;
-  - packages a platform VSIX per OS plus a universal one;
-  - creates a GitHub Release with SHA256SUMS;
-  - publishes to Open VSX (`OVSX_PAT`) and the VS Code Marketplace (`VSCE_PAT`) when those repo secrets exist.
+- **Engine**: `python engine/build.py`, using a clean venv with `requirements-engine.txt`, builds `dist/shield-engine/`. It is a standalone bundle: codescan CLI, MCP stdio server, LLM helper and bandit. `python scripts/smoke_engine.py dist/shield-engine` checks it.
+- **Extension for your OS**: `cd vscode && rm -rf engine && mkdir engine && cp -RL ../dist/shield-engine engine/ && npx vsce package --no-dependencies --target darwin-arm64` (or `win32-x64` / `linux-x64`, built on that OS). Share the `.vsix`; users install it with **Extensions: Install from VSIX…**, no Python needed.
 
 ## Tests
 
