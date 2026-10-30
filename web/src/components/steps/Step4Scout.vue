@@ -28,7 +28,11 @@
         <div class="check-row mono">
           <label><input type="checkbox" v-model="form.crawl" /> ALSO CRAWL REGISTRY SITES (needs a reference image or enrolment below)</label>
         </div>
+        <label v-if="form.crawl" class="mono url-box">EXTRA PAGES TO SCAN FOR YOUR IMAGE (ONE URL PER LINE, MAX 20; ROBOTS.TXT APPLIES, LINKS ARE NOT FOLLOWED)
+          <textarea class="field mono" rows="4" v-model="form.urls" placeholder="https://example.com/page"></textarea>
+        </label>
         <p v-if="session.scoutError" class="err-line mono">{{ session.scoutError }}</p>
+        <p v-if="crawlGap" class="err-line mono">{{ crawlGap }}</p>
 
         <div class="counters-row">
           <div class="counter-box">
@@ -205,7 +209,7 @@ import { api } from '../../api/index'
 
 const emit = defineEmits(['next-step'])
 const entityTypes = ['IN_AADHAAR', 'IN_PAN', 'CREDIT_CARD', 'EMAIL_ADDRESS', 'MOBILE_IN', 'IN_BANK_ACCOUNT']
-const form = reactive({ org: '', domain: '', types: ['IN_AADHAAR', 'IN_PAN'], crawl: false })
+const form = reactive({ org: '', domain: '', types: ['IN_AADHAAR', 'IN_PAN'], crawl: false, urls: '' })
 
 const refFile = ref(null)
 const refAuthorised = ref(false)
@@ -220,8 +224,18 @@ let camera = null
 
 const canEnrol = computed(() => photo.value && selfie.value && consentChecked.value)
 
+const crawlGap = computed(() => {
+  const c = session.discovery?.crawl
+  if (!c) return ''
+  const gaps = []
+  if (c.images_failed) gaps.push(`${c.images_failed} image(s) could not be fetched`)
+  if (c.blocked) gaps.push(`${c.blocked} page(s) were blocked`)
+  if (c.robots_denied) gaps.push(`${c.robots_denied} page(s) disallowed by robots.txt`)
+  if (c.timed_out) gaps.push('the crawl hit its time limit')
+  return gaps.length ? `Not fully checked: ${gaps.join(', ')}. No match means none found in what was read, not that the image is absent.` : ''
+})
 const allBlocked = computed(() => session.queries.length > 0 && session.queries.every((q) => !q.allowed))
-const start = () => runScout({ org: form.org.trim(), domain: form.domain.trim().toLowerCase(), entity_types: form.types, crawl: form.crawl })
+const start = () => runScout({ org: form.org.trim(), domain: form.domain.trim().toLowerCase(), entity_types: form.types, crawl: form.crawl, extra_urls: form.crawl ? form.urls.split('\n').map((u) => u.trim()).filter(Boolean) : [] })
 
 const addReference = async () => {
   refError.value = ''

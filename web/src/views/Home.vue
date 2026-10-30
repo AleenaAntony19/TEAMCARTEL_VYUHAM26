@@ -24,12 +24,12 @@
             @drop.prevent="onFileDrop"
             @click="fileInputRef?.click()"
           >
-            <input type="file" ref="fileInputRef" class="hidden-input" accept=".pdf,.docx,.xlsx,.png,.jpg,.jpeg,.txt" @change="onFileSelected" />
+            <input type="file" ref="fileInputRef" class="hidden-input" accept=".pdf,.docx,.xlsx,.png,.jpg,.jpeg,.txt,.csv,.json" @change="onFileSelected" />
             <div class="dropzone-content">
               <span class="drop-icon">📁</span>
               <p class="drop-primary mono">{{ selectedFile ? selectedFile.name : 'DRAG & DROP CASE DOCUMENT HERE' }}</p>
               <p class="drop-secondary">
-                {{ selectedFile ? `${(selectedFile.size / 1024).toFixed(1)} KB ready for inspection` : 'Supports PDF, DOCX, XLSX, PNG/JPEG images and TXT' }}
+                {{ selectedFile ? `${(selectedFile.size / 1024).toFixed(1)} KB ready for inspection` : 'Supports PDF, DOCX, XLSX, PNG/JPEG images, TXT, CSV and JSON' }}
               </p>
             </div>
           </div>

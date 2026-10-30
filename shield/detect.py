@@ -209,10 +209,14 @@ _ID_LABELLED = {
 }
 
 
+_NAME_LABELLED = re.compile(r"""(?i:\b(?:full[ _]?name|name|user|customer|employee|patient)["']?\s*[:=]\s*["']?)([A-Z][a-z]+(?: [A-Z][a-z]+){1,3})\b""")
+
+
 def labelled_ids(text: str, layer: str = "visible") -> list[Entity]:
     """Values a label calls a government ID that detect() rejected: a misread or mistyped real ID fails its
     checks too, so scanners report these as unverified. Kept out of detect(), whose hits are verified."""
     hits = [(typ, m) for typ, rx in _ID_LABELLED.items() for m in rx.finditer(text)]
+    hits += [("PERSON", m) for m in _NAME_LABELLED.finditer(text)]
     if not hits:
         return []
     known = detect(text, layer)

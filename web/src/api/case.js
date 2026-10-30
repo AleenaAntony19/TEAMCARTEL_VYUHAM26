@@ -41,6 +41,7 @@ export async function createCase(file) {
   stopAll()
   resetSession()
   const { id } = await api.submitFile(file)
+  if (file.type.startsWith('image/')) session.originalUrl = URL.createObjectURL(file)
   return id
 }
 
@@ -132,7 +133,7 @@ function followSwarm() {
   })
 }
 
-export async function runScout({ org, domain, entity_types, crawl }) {
+export async function runScout({ org, domain, entity_types, crawl, extra_urls }) {
   const requestedCrawl = crawl
   if (session.scoutRunning) return
   Object.assign(session, { queries: [], textHits: [], matches: [], discovery: null, scoutError: '', counters: { pages: 0, images: 0, blocked: 0, matches: 0 } })
@@ -141,7 +142,7 @@ export async function runScout({ org, domain, entity_types, crawl }) {
   const finish = () => { session.scoutRunning = false; setStatus('Ready', 'completed') }
   let id
   try {
-    ({ id } = await api.discover({ org, domain, entity_types, crawl, use_faces: session.enrolled, job_id: session.jobId || undefined }))
+    ({ id } = await api.discover({ org, domain, entity_types, crawl, extra_urls, use_faces: session.enrolled, job_id: session.jobId || undefined }))
   } catch (e) {
     session.scoutRunning = false
     session.scoutError = e.message

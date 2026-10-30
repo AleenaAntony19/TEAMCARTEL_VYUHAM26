@@ -4,12 +4,17 @@ import asyncio
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
 from .models import ImageRef
+
+
+RETRYABLE = {"http_403", "http_429"}
+RETRY_WAIT = 5.0
+IMAGE_RPS = 3.0  # images were unpaced: real sites answer a burst with 403, and the match is then silently lost
 
 
 @dataclass
@@ -23,6 +28,7 @@ class Job:
     risk: float = 0.0
     tier: int = 2
     seq: int = 0
+    retries: int = 0
 
 
 def classify(soup: BeautifulSoup, seed_category: str = "") -> str:
@@ -57,14 +63,15 @@ def _image_urls(soup: BeautifulSoup, base: str) -> set[str]:
             out.add(_abs(base, value))
     for a in soup.select("a[href]"):
         href = _abs(base, a["href"])
-        if re.search(r"\.(jpg|jpeg|png|webp|gif|bmp)(\?|$)", href, re.I):
+        if re.search(r"\.(jpg|jpeg|png|webp|gif|bmp)(\?|$)", href, re.I) and "/wiki/File:" not in href:  # that is a page, not an image
             out.add(href)
-    return out
+    return {u for u in out if not re.search(r"\.svg(\?|$)", u, re.I)}  # vector icons cannot be hashed
 
 
 class Scheduler:
     def __init__(self, rps_per_domain: float = 1.0, global_concurrency: int = 8, budget_pages: int = 500, max_depth: int = 10):
         self.rps = rps_per_domain
+        self.image_gap = 1.0 / max(IMAGE_RPS, rps_per_domain)
         self.max_depth = max_depth
         self.sem = asyncio.Semaphore(global_concurrency)
         self.budget_pages = budget_pages
@@ -87,12 +94,12 @@ class Scheduler:
         self.pending += 1
         self.q.put_nowait((tier, -risk, job.seq, job))
 
-    async def _pace(self, domain: str):
+    async def _pace(self, domain: str, gap: float | None = None):
         lock = self._locks.setdefault(domain, asyncio.Lock())
         async with lock:
             now = time.monotonic()
             last = self._last.get(domain, 0.0)
-            wait = (1.0 / self.rps) - (now - last)
+            wait = (1.0 / self.rps if gap is None else gap) - (now - last)
             if wait > 0:
                 await asyncio.sleep(wait)
             self._last[domain] = time.monotonic()
@@ -107,6 +114,7 @@ class Scheduler:
 
         if job.kind == "image":
             self.counters["images"] += 1
+            await self._pace(urlparse(job.url).netloc, self.image_gap)
             await on_image(ImageRef(job.page_url or job.url, job.url, domain))
             self.pending -= 1
             if self.pending <= 0:
@@ -117,6 +125,11 @@ class Scheduler:
         async with self.sem:
             res = await fetcher.get(job.url)
 
+        if res.blocked_reason in RETRYABLE and job.retries < 1:  # often a rate limit, not a ban: back off once before giving up on the site
+            await asyncio.sleep(RETRY_WAIT)
+            self.push(job.tier, job.risk, replace(job, retries=job.retries + 1))
+            self.pending -= 1
+            return
         if res.blocked_reason:
             if res.blocked_reason == "robots":
                 self.counters["robots_denied"] += 1
@@ -182,14 +195,14 @@ class Scheduler:
                 if self.pending <= 0:
                     self._done.set()
 
-    async def run(self, fetcher, on_image, on_event) -> dict:
+    async def run(self, fetcher, on_image, on_event, timeout: float = 120) -> dict:
         if self.pending == 0:
             return dict(self.counters)
         workers = [asyncio.create_task(self._worker(fetcher, on_image, on_event)) for _ in range(8)]
         try:
-            await asyncio.wait_for(self._done.wait(), timeout=120)
+            await asyncio.wait_for(self._done.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            pass
+            self.counters["timed_out"] = True  # the report must say the crawl stopped early
         finally:
             for w in workers:
                 w.cancel()

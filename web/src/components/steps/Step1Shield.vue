@@ -82,6 +82,17 @@
           The black box in common PDF viewers is <strong>NOT</strong> redaction: the bytes stay in the file. Left is where those values sit now (masked here). Right is the text that can still be extracted from the sanitized output.
         </p>
 
+        <div v-if="session.redaction?.has_preview_image" class="image-compare">
+          <figure v-if="session.originalUrl">
+            <figcaption class="mono">ORIGINAL (only in this browser)</figcaption>
+            <img :src="session.originalUrl" alt="Original upload" />
+          </figure>
+          <figure>
+            <figcaption class="mono">SANITIZED OUTPUT (real file from the server)</figcaption>
+            <img :src="api.previewImageUrl(session.jobId, session.redaction.sha256)" alt="Sanitized output" />
+          </figure>
+        </div>
+
         <div class="comparison-grid">
           <div class="compare-pane naive-pane">
             <div class="pane-header">
@@ -107,6 +118,7 @@
         </div>
 
         <div class="next-action-row">
+          <button class="action-btn mono" @click="downloadFindings">⬇️ DOWNLOAD FINDINGS JSON (MASKED)</button>
           <button class="action-btn mono" @click="emit('next-step')">PROCEED TO STEP 2: AGENT SWARM →</button>
         </div>
       </div>
@@ -118,11 +130,23 @@
 import { computed } from 'vue'
 import { session } from '../../store/session'
 import { redactNow } from '../../api/case'
+import { api } from '../../api/index'
 
 const emit = defineEmits(['next-step'])
 
 const selectedCount = computed(() => Object.keys(session.selection).length)
 const statusLabel = computed(() => (session.job ? session.job.status.toUpperCase() : 'NO DOCUMENT'))
+
+const downloadFindings = () => {
+  const j = session.job
+  const report = { file: j.display_name, severity: session.severity, score: session.severityScore, redaction: session.redaction?.status ?? null,
+    findings: j.findings.map(({ id, type, severity, confidence, layer, masked, recommendation }) => ({ id, type, severity, confidence, layer, masked, recommendation })) }
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }))
+  a.download = `shield_findings_${j.id.slice(0, 8)}.json`
+  a.click()
+  URL.revokeObjectURL(a.href)
+}
 
 const toggle = (f) => {
   if (session.selection[f.id]) delete session.selection[f.id]

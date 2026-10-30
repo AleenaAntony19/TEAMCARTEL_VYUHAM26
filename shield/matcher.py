@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import datetime, timezone
 
@@ -29,15 +30,21 @@ class Matcher:
         self.enrolled = enrolled
         self.bank = bank
         self.matches: list[Match] = []
+        self.failed = 0
         self._urls: set[str] = set()
         self._shas: set[str] = set()
 
     async def on_image(self, ref, fetcher) -> Match | None:
         if ref.image_url in self._urls:
             return None
+        self._urls.add(ref.image_url)  # the same image on many pages is fetched once
 
         res = await fetcher.get(ref.image_url)
+        if res.blocked_reason in {"http_403", "http_429"}:
+            await asyncio.sleep(3)  # usually a rate limit: one patient retry
+            res = await fetcher.get(ref.image_url)
         if res.blocked_reason or not res.body:
+            self.failed += 1  # counted, so "no match" can never hide "could not check"
             return None
 
         data = res.body
@@ -87,7 +94,6 @@ class Matcher:
                 last_modified=res.headers.get("last-modified"),
             )
             self.matches.append(m)
-            self._urls.add(ref.image_url)
             self._shas.add(sha)
             del data, arr, img, vecs, regions
             return m

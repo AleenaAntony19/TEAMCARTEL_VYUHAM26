@@ -11,6 +11,7 @@ import hashlib
 import io
 import logging
 import os
+import re
 import secrets
 import shutil
 import tempfile
@@ -21,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from .. import llm, pdq, uploads, verify
-from ..detect import detect, replacement
+from ..detect import UNVERIFIED, detect, labelled_ids, replacement, severity
 from ..ledger import Ledger
 from ..models import BASE, SFACE, YUNET, Entity
 from ..redact import redact, redact_text
@@ -44,7 +46,7 @@ MAX_PENDING = int(os.getenv("SHIELD_MAX_PENDING", "16"))
 CRAWL_MAX_PAGES = int(os.getenv("SHIELD_CRAWL_MAX_PAGES", "100"))
 CRAWL_MAX_DEPTH = int(os.getenv("SHIELD_CRAWL_MAX_DEPTH", "3"))
 CRAWL_RPS = float(os.getenv("SHIELD_CRAWL_RPS", "1"))
-CRAWL_TIMEOUT = float(os.getenv("SHIELD_CRAWL_TIMEOUT", "120"))
+CRAWL_TIMEOUT = float(os.getenv("SHIELD_CRAWL_TIMEOUT", "300"))
 REGISTRY = Path(os.getenv("SHIELD_REGISTRY") or BASE / "registry/seeds.yaml")
 API_TOKEN = os.getenv("SHIELD_API_TOKEN", "")
 LOCAL_ONLY = os.getenv("SHIELD_LOCAL_ONLY") == "1"
@@ -54,9 +56,10 @@ SEVERITY = {
     "IN_AADHAAR": "critical", "CREDIT_CARD": "critical", "IN_BANK_ACCOUNT": "critical",
     "IN_PAN": "high", "IN_PASSPORT": "high", "IN_UPI": "high", "IN_IFSC": "medium",
     "MOBILE_IN": "medium", "EMAIL_ADDRESS": "medium", "IN_GSTIN": "medium",
-    "PERSON": "low", "ORG": "low", "DATE_TIME": "low", "FACE": "high", "GEO_COORDINATES": "high",
+    "API_KEY": "critical", "PERSON": "low", "ORG": "low", "DATE_TIME": "low", "FACE": "high", "GEO_COORDINATES": "high",
 }
 RECOMMEND = {
+    "API_KEY": "Rotate this key now, then remove it: anyone who has seen this file can use it.",
     "IN_AADHAAR": "Remove or replace; Aadhaar must not be shared outside authorised KYC flows (masked form keeps last 4 at most).",
     "CREDIT_CARD": "Remove; card numbers must not be stored or shared (PCI-DSS).",
     "IN_BANK_ACCOUNT": "Remove or tokenise the account number.",
@@ -257,6 +260,23 @@ def _face_entities(src: Path) -> list[tuple[Entity, str]]:
     return out
 
 
+def _extra_entities(layers: dict[str, str], entities: list[Entity]) -> list[Entity]:
+    """What the strict detectors reject but a reviewer must still see: labelled IDs that fail their checks, and API keys."""
+    from ..codescan.secrets import EXTRA_RULES, is_doc_example
+
+    out: list[Entity] = []
+    for layer, text in layers.items():
+        found = labelled_ids(text, layer)
+        ascii_text = re.sub(r"[^\x00-\x7F]", "X", text)  # OCR misreads a glyph inside keys; 1:1 keeps offsets valid
+        for rx in EXTRA_RULES.values():
+            found += [Entity("API_KEY", m.group(0), m.start(), m.end(), 0.85, layer) for m in rx.finditer(ascii_text) if not is_doc_example(m.group(0))]
+        for e in found:
+            taken = [o for o in entities + out if o.layer == layer]
+            if not any(o.start < e.end and o.end > e.start for o in taken):
+                out.append(e)
+    return out
+
+
 def _analyse(job: Job, src: Path) -> None:
     from ..detect import audit_all_extracted_text
     from ..detector import DetectorAgent
@@ -276,15 +296,19 @@ def _analyse(job: Job, src: Path) -> None:
     entities, kept, records = detection.detected, detection.entities, detection.reviews
     job.stages[-1].detail = f"{len(entities)} detected · {len(kept)} kept · {sum(r.verdict == 'dismissed' for r in records)} dismissed · {detection.severity_band}"
     # audit against everything the personas looked at, so a deliberate dismissal is not re-raised as a miss
-    audit = _run_stage(job, "validator_audit", lambda: audit_all_extracted_text(layers, entities))
+    extras = _extra_entities(layers, entities)
+    audit = _run_stage(job, "validator_audit", lambda: audit_all_extracted_text(layers, entities + extras))
     job.stages[-1].detail = f"{audit.verification_completeness_pct:.1f}% complete · {len(audit.potential_misses)} potential misses in {audit.total_tokens_scanned} tokens"
     job.raw = (entities, layers)
-    job.summary = {"layers": list(layers), "severity": detection.severity_band, "score": detection.severity_score}
+    score, band, _ = severity(kept + extras)
+    if any(e.type == "API_KEY" for e in extras):  # a live key is an incident whatever else the file holds
+        score, band = max(score, 90), "CRITICAL"
+    job.summary = {"layers": list(layers), "severity": band, "score": score}
     rec_by_key = {}
     ri = iter(records)
     for e in entities:  # records align with non-FACE entities in order
         rec_by_key[(e.layer, e.start, e.type)] = next(ri)
-    spans = {n: [(e.start, e.end) for e in entities if e.layer == n] for n in layers}
+    spans = {n: [(e.start, e.end) for e in entities + extras if e.layer == n] for n in layers}
     for m in audit.potential_misses:
         spans.setdefault(m.layer, []).append((m.start, m.end))
 
@@ -301,13 +325,13 @@ def _analyse(job: Job, src: Path) -> None:
 
     findings, ents = [], {}
     salt = job.id.encode()
-    for e in kept:
+    for e in kept + extras:
         fid = hashlib.sha256(salt + f"{e.type}|{e.layer}|{e.start}".encode()).hexdigest()[:12]
         rec = rec_by_key.get((e.layer, e.start, e.type))
         actions = FILE_ACTIONS.get(job.suffix, ["token", "mask", "remove"]) if e.layer in {"visible", "ocr"} else ["token", "mask", "remove"]
         findings.append({
-            "id": fid, "type": e.type, "severity": SEVERITY.get(e.type, "medium"), "confidence": round(e.score, 2),
-            "layer": e.layer, "location": {"layer": e.layer, "start": e.start, "end": e.end},
+            "id": fid, "type": e.type, "severity": "medium" if e.score == UNVERIFIED and e.type != "PERSON" else SEVERITY.get(e.type, "medium"),
+            "confidence": round(e.score, 2), "layer": e.layer, "location": {"layer": e.layer, "start": e.start, "end": e.end},
             "masked": mask_value(e.value), "evidence": _evidence(layers.get(e.layer, ""), e.start, e.end, spans.get(e.layer, [])),
             "analyzer": f"pattern:{e.type}", "checks": [asdict(c) for c in rec.checks] if rec else [],
             "recommendation": RECOMMEND.get(e.type, "Review; replace with a token if not needed by the recipient."),
@@ -315,6 +339,8 @@ def _analyse(job: Job, src: Path) -> None:
         })
         ents[fid] = e
     for m in audit.potential_misses:  # validator agent: tokens the detectors did not classify
+        if m.layer == "exif" and m.band not in {"CRITICAL", "HIGH"}:
+            continue  # XMP schema URLs and the like, not personal data
         fid = hashlib.sha256(salt + f"MISS|{m.layer}|{m.start}".encode()).hexdigest()[:12]
         findings.append({
             "id": fid, "type": "POTENTIAL_LEAK", "severity": {"CRITICAL": "high", "HIGH": "medium"}.get(m.band, "low"),
@@ -364,6 +390,14 @@ class DiscoveryRequest(BaseModel):
     crawl: bool = False
     use_faces: bool = False  # opt-in: also compare crawled faces with the consented enrolment
     job_id: str | None = None  # block this job's detected values from every query
+    extra_urls: list[str] = Field(default_factory=list, max_length=20)  # pages to scan once, without following links
+
+    @field_validator("extra_urls")
+    @classmethod
+    def _http_only(cls, urls: list[str]) -> list[str]:
+        if any(not u.startswith(("https://", "http://")) or len(u) > 2000 for u in urls):
+            raise ValueError("extra_urls must be http(s) URLs")
+        return urls
 
 
 class LLMSettings(BaseModel):
@@ -768,11 +802,11 @@ def _discover(job: Job, req: DiscoveryRequest, blocked_values: list[str]) -> Non
     if not len(REFERENCES) and not faces:
         job.stages.append(Stage("crawl", "skipped", "no reference images or face enrolment"))
         return
-    _run_stage(job, "crawl+match", lambda: asyncio.run(_crawl(job, results, faces)))
+    _run_stage(job, "crawl+match", lambda: asyncio.run(_crawl(job, results, faces, req.extra_urls)))
     job.ledger.append("scout", "CRAWL", {k: v for k, v in (job.discovery["crawl"] or {}).items()})
 
 
-async def _crawl(job: Job, results: list[dict], use_faces: bool = False) -> None:
+async def _crawl(job: Job, results: list[dict], use_faces: bool = False, extra_urls: list[str] = ()) -> None:
     from ..crawl import Job as CrawlJob, Scheduler
     from ..matcher import Matcher
     from ..net import Fetcher
@@ -785,6 +819,8 @@ async def _crawl(job: Job, results: list[dict], use_faces: bool = False) -> None
     for row in load_registry(REGISTRY):
         for url in row.get("entry_urls", []):
             sched.push(row.get("tier", 2), 0.5, CrawlJob(url, "page", 0, row["domain"], seed_category=row["category"]))
+    for url in extra_urls:  # depth at the limit: scan this page, follow nothing
+        sched.push(1, 0.5, CrawlJob(url, "page", CRAWL_MAX_DEPTH, urlparse(url).hostname or ""))
 
     async def on_image(ref):
         m = await matcher.on_image(ref, fetcher)
@@ -801,7 +837,7 @@ async def _crawl(job: Job, results: list[dict], use_faces: bool = False) -> None
     async def on_event(ev):
         _scout_event(job, ev)  # page fetched / blocked / robots-denied / error: public URLs and counters only
 
-    task = asyncio.create_task(sched.run(fetcher, on_image, on_event))
+    task = asyncio.create_task(sched.run(fetcher, on_image, on_event, CRAWL_TIMEOUT))
     deadline = time.monotonic() + CRAWL_TIMEOUT
     while not task.done():
         if job.cancel.is_set() or time.monotonic() > deadline:
@@ -812,7 +848,7 @@ async def _crawl(job: Job, results: list[dict], use_faces: bool = False) -> None
         counters = await task
     except asyncio.CancelledError:
         counters = dict(sched.counters, stopped="cancelled" if job.cancel.is_set() else "timeout")
-    job.discovery["crawl"] = counters
+    job.discovery["crawl"] = {**counters, "images_failed": matcher.failed}
     if job.cancel.is_set():
         raise Cancelled()
 

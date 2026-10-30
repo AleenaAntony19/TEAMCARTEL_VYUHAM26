@@ -5,6 +5,7 @@ const initialSession = () => ({
   caseId: '',
   jobId: '',
   filename: '',
+  originalUrl: '', // browser-only link to the uploaded image, never sent anywhere
   job: null,
   currentStep: 1,
   viewMode: 'split', // 'graph' | 'split' | 'workbench'

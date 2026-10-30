@@ -34,6 +34,7 @@ class ScoutBody(BaseModel):
     entity_types: list[str] = Field(default_factory=list, max_length=20)
     job_id: str | None = None
     use_faces: bool = False
+    extra_urls: list[str] = Field(default_factory=list, max_length=20)
 
 
 @router.post("/shield/analyze", status_code=202, tags=["shield"])
@@ -56,7 +57,7 @@ def redact(body: RedactBody):
 
 def _scout(body: ScoutBody, crawl: bool) -> dict:
     req = DiscoveryRequest(org=body.org, domain=body.domain, entity_types=body.entity_types, crawl=crawl,
-                           use_faces=body.use_faces, job_id=body.job_id)
+                           use_faces=body.use_faces, job_id=body.job_id, extra_urls=body.extra_urls)
     return {"job_id": server.start_discovery(req)["id"]}
 
 

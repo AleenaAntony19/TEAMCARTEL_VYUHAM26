@@ -371,3 +371,66 @@ def test_unsafe_result_links_are_dropped():
     from shield.textscout import _hit
 
     assert _hit("javascript:alert(1)", "t", "s", "brave")["url"] == ""
+
+
+def _job_for(client, text):
+    jid = client.post("/api/jobs", data={"text": text}).json()["id"]
+    for _ in range(300):
+        j = client.get(f"/api/jobs/{jid}").json()
+        if j["status"] != "queued" and j["status"] != "running":
+            return j
+        time.sleep(0.02)
+    raise AssertionError("job did not finish")
+
+
+def test_website_sees_labelled_ids_keys_and_names_like_the_scanner(client):
+    fake_key = "gsk_" + "aB3dE" * 10
+    j = _job_for(client, f'Aadhaar No = 123456789012\nvoter id = ABCD1234QUYU\n"user": "Ravi Kumar"\nkey {fake_key}\n')
+    by = {f["type"]: f for f in j["findings"]}
+    assert by["IN_AADHAAR"]["severity"] == "medium" and by["IN_VOTER_ID"]["severity"] == "medium"
+    assert by["PERSON"]["masked"] and by["API_KEY"]["severity"] == "critical"
+    assert j["summary"]["severity"] == "CRITICAL" and j["summary"]["score"] >= 90
+    assert fake_key not in json.dumps(j)
+    sel = [{"finding_id": f["id"], "action": f["actions"][0]} for f in j["findings"]]
+    r = client.post(f"/api/jobs/{j['id']}/redact", json={"selections": sel}).json()
+    assert r["status"] == "CLEAN" and fake_key not in r["preview_text"] and "123456789012" not in r["preview_text"]
+
+
+def test_extra_urls_must_be_http(client):
+    body = {"org": "Acme Corp", "extra_urls": ["file:///etc/passwd"]}
+    assert client.post("/api/discovery", json=body).status_code == 422
+
+
+def test_image_pages_and_icons_are_not_treated_as_images():
+    from bs4 import BeautifulSoup
+
+    from shield.crawl import _image_urls
+
+    html = '<a href="/wiki/File:A.jpg">x</a><a href="/a/real.jpg">y</a><img src="/i/icon.svg"><img src="/i/photo.png">'
+    assert _image_urls(BeautifulSoup(html, "html.parser"), "https://w.org/p") == {"https://w.org/a/real.jpg", "https://w.org/i/photo.png"}
+
+
+def test_a_failed_image_is_counted_and_a_rate_limit_is_retried(monkeypatch):
+    import asyncio
+
+    from shield.matcher import Matcher
+    from shield.models import ImageRef
+
+    class Res:
+        def __init__(self, reason):
+            self.blocked_reason, self.body, self.headers = reason, b"", {}
+
+    calls = []
+
+    class F:
+        async def get(self, url):
+            calls.append(url)
+            return Res("http_403")
+
+    async def no_wait(_):
+        return None
+
+    monkeypatch.setattr("shield.matcher.asyncio.sleep", no_wait)
+    m = Matcher([], None)
+    assert asyncio.run(m.on_image(ImageRef("p", "i", "d"), F())) is None
+    assert len(calls) == 2 and m.failed == 1

@@ -22,6 +22,7 @@ from typing import Callable
 from . import llm
 from .agent_runtime import AgentResult, AutonomousAgent
 from .mcp.tools import (
+    FLOOR_TYPES,
     SESSIONS,
     adversarial_penetration_test,
     execute_destructive_redaction,
@@ -33,7 +34,7 @@ from .mcp.tools import (
 
 MAX_CYCLES = 3
 JSON_ONLY = " Values are masked; never guess them. Ground every claim in a tool observation or the given findings. Finish with JSON only."
-OPINIONS = ' {"opinions":[{"id":str,"stance":"redact"|"keep","reason":str}]}'
+OPINIONS = ' {"opinions":[{"id":str,"stance":"redact"|"keep","reason":"max 8 words"}]}'
 DOC_ACTIONS = {"token", "mask", "remove", "keep"}
 CODE_ACTIONS = {"move_to_env", "redact_pii", "fake_pii", "yaml_safe_load", "requests_verify", "keep"}
 
@@ -82,8 +83,8 @@ async def run_agentic(session_id: str, cfg: llm.LLMConfig, on_event: Callable[[d
 
     # ---- MetaPlanner: dynamic specialists
     if kind == "document":
-        menu = ("SovereignPIIAgent [validate_checksum] for Indian IDs/cards; DocumentForensicAgent [extract_ocr_region] for scans "
-                "or images; VisualLikenessAgent [compute_perceptual_pdq, compute_pca_projection] for photos")
+        # no ID specialist here: StatutoryAuditor already validates every checksum, a second pass only spends tokens
+        menu = ("DocumentForensicAgent [extract_ocr_region] for scans or images; VisualLikenessAgent [compute_perceptual_pdq, compute_pca_projection] for photos")
     else:
         menu = "SecretsAuditor [list_code_findings] for credentials; PiiFixtureAuditor [list_code_findings] for personal data in code"
     plan = await agent("MetaPlanner",
@@ -98,15 +99,20 @@ async def run_agentic(session_id: str, cfg: llm.LLMConfig, on_event: Callable[[d
         findings = list_findings(session_id)["findings"]  # OCR specialists may have added findings
     briefs = [{"agent": c.name, "summary": str((c.verdict or {}).get("summary", ""))[:200]} for c in plan.children]
     compact = _compact(findings)
+    # the safety floor redacts these in code whatever an agent says, so debating them only spends tokens
+    debatable = [f for f in compact if kind != "document" or f.get("type") not in FLOOR_TYPES]
 
     # ---- Round 1: claim / challenge / proof (parallel; the auditor only when something has a checksum)
     personas = _personas(kind)
     eligible = [f for f in compact if f.get("type") in CHECKSUM_TYPES]
     if kind == "document" and not eligible:
         personas.pop("StatutoryAuditor")
+    if not debatable:
+        personas.pop("PrivacyHawk")
+        personas.pop("PragmaticDev")
     r1 = await asyncio.gather(*[
         agent(n, f"You are {n}. {brief}" + JSON_ONLY + OPINIONS, tools).execute(
-            {"findings": eligible if n == "StatutoryAuditor" and kind == "document" else compact, "specialists": briefs}, max_steps=3)
+            {"findings": eligible if n == "StatutoryAuditor" and kind == "document" else debatable, "specialists": briefs}, max_steps=3)
         for n, (brief, tools) in personas.items()])
     agents.extend(r1)
     debate = {r.name: (r.verdict or {}).get("opinions", []) for r in r1}
@@ -117,7 +123,7 @@ async def run_agentic(session_id: str, cfg: llm.LLMConfig, on_event: Callable[[d
         opt = await agent("FormatGuard",
                           "You optimize document redactions for layout: call measure_layout, then pick per finding the action that "
                           "removes the value while keeping table/line widths (mask keeps length; PDFs/images always fill boxes)."
-                          + JSON_ONLY + ' {"proposals":[{"id":str,"action":"token"|"mask"|"remove","reason":str}]}',
+                          + JSON_ONLY + ' {"proposals":[{"id":str,"action":"token"|"mask"|"remove"}]}',
                           ["measure_layout"]).execute({"finding_ids": [f["id"] for f in findings]}, max_steps=3)
         actions, act_desc = DOC_ACTIONS, '"token"|"mask"|"remove"|"keep"'
     else:
@@ -131,7 +137,7 @@ async def run_agentic(session_id: str, cfg: llm.LLMConfig, on_event: Callable[[d
     debate[opt.name] = (opt.verdict or {}).get("proposals", [])
 
     # compact stance table: {id: {"type":..., "PrivacyHawk": "redact: reason", ...}}
-    table: dict[str, dict] = {f["id"]: {"type": f.get("type") or f.get("rule")} for f in findings}
+    table: dict[str, dict] = {f["id"]: {"type": f.get("type") or f.get("rule")} for f in debatable}
     for who, items in debate.items():
         for o in items if isinstance(items, list) else []:
             if isinstance(o, dict) and o.get("id") in table:
@@ -139,7 +145,7 @@ async def run_agentic(session_id: str, cfg: llm.LLMConfig, on_event: Callable[[d
     adj = await agent("SwarmAdjudicator",
                       "🧠 Synthesize the debate into ONE binding plan. Everything is redacted by default with the optimizer's action. "
                       "List as keep ONLY findings PragmaticDev showed to be placeholders/test/non-personal; a valid checksum always means "
-                      "redact (Rule of Mathematical Superiority). You may override an action." + JSON_ONLY +
+                      "redact (Rule of Mathematical Superiority). List in actions ONLY overrides of the optimizer; leave it empty otherwise." + JSON_ONLY +
                       ' {"keep":[{"finding_id":str,"reason":str}],"actions":[{"finding_id":str,"action":' + act_desc + "}]}",
                       []).execute({"debate": table}, max_steps=2)
     agents.append(adj)

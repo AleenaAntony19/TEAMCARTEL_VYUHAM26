@@ -10,7 +10,7 @@ import httpx
 
 from .models import FetchResult
 
-UA = "ShieldScoutBot/1.0 (+contact: local-demo)"
+UA = "ShieldScoutBot/1.0 (+https://github.com/AleenaAntony19/TEAMCARTEL_VYUHAM26)"
 
 
 def ip_allowed(ip: str) -> bool:

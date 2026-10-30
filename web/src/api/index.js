@@ -36,6 +36,7 @@ export const api = {
   job: (id) => call(`/api/jobs/${id}`),
   redact: (id, selections) => post(`/api/jobs/${id}/redact`, { selections }),
   downloadUrl: (id) => `/api/jobs/${id}/download`,
+  previewImageUrl: (id, sha) => `/api/jobs/${id}/preview.png?v=${sha}`,
   clearSession: () => call('/api/session', { method: 'DELETE' }),
   discover: (body) => post('/api/discovery', body),
   addReference: (file, label) => form('/api/references', { file, label, authorized: 'true' }),

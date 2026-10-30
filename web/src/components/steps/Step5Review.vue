@@ -38,6 +38,7 @@
                 </div>
 
                 <div class="match-verdict mono font-bold">{{ m.evidence_status }}</div>
+                <div class="mono">{{ m.match_type }}<template v-if="m.pdq_distance != null"> · PDQ distance {{ m.pdq_distance }} of 256 (0 = same)</template><template v-if="m.similarity != null"> · face similarity {{ m.similarity.toFixed(2) }}</template></div>
 
                 <div class="url-block">
                   <div class="url-line">

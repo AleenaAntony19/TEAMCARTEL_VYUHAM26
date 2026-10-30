@@ -127,3 +127,8 @@ a.action-btn, a.dc-btn { text-decoration: none; display: inline-block; text-alig
 .sev-critical, .sev-high { color: var(--red); }
 .agent-state.done { color: var(--blue); }
 .agent-state.error { color: var(--red); }
+.image-compare { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.image-compare figure { flex: 1; min-width: 240px; border: 1px solid var(--line); }
+.image-compare figcaption { padding: 6px 8px; font-size: 11px; border-bottom: 1px solid var(--line); }
+.image-compare img { display: block; width: 100%; }
+.url-box { display: block; font-size: 11px; margin-bottom: 12px; }
