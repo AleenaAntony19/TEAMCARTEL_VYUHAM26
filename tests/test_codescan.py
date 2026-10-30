@@ -201,11 +201,11 @@ def test_dark_code_screenshot_secrets_found_separately_and_redacted(tmp_path):
 def test_ocr_split_aws_key_is_rejoined(tmp_path, monkeypatch):
     from shield.codescan import media
 
-    words = [("AWS_KEY", (0, 0, 80, 10)), ("=", (90, 0, 10, 10)), ("AKIAEUH3Y2OLC559F", (110, 0, 170, 10)), ("TAF", (285, 0, 30, 10))]
+    words = [("AWS_KEY", (0, 0, 80, 10)), ("=", (90, 0, 10, 10)), ("AKIA" + "EUH3Y2OLC559F", (110, 0, 170, 10)), ("TAF", (285, 0, 30, 10))]
     monkeypatch.setattr(media, "ocr_words", lambda p: words)
     seen = []
     found = media._ocr_findings(tmp_path / "x.png", "x.png", seen)
-    assert [(f.rule, f.bbox) for f in found] == [("OCR_SECRET", [110, 0, 205, 10])] and seen == [("AWS Access Key", "AKIAEUH3Y2OLC559FTAF")]
+    assert [(f.rule, f.bbox) for f in found] == [("OCR_SECRET", [110, 0, 205, 10])] and seen == [("AWS Access Key", "AKIA" + "EUH3Y2OLC559FTAF")]
     monkeypatch.setattr(media, "ocr_words", lambda p: [("gsk_" + "aB3" * 7 + "£" + "cD4" * 7 + "e2", (0, 0, 400, 10))])
     assert [f.rule for f in media._ocr_findings(tmp_path / "x.png", "x.png")] == ["OCR_SECRET"], "a misread glyph must not hide the key"
 
