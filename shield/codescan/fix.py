@@ -149,6 +149,11 @@ def plan_fix(root: Path, finding: dict, kind: str) -> FixPlan:
 
             text = " ".join(w for w, _ in ocr_words(path))
             entities = [Entity(e.type, e.value, e.start, e.end, e.score) for e in detect(text)]
+            from .media import _ocr_findings
+
+            secrets_seen: list = []
+            _ocr_findings(path, rel, secrets_seen)  # API keys in screenshots get blacked out too
+            entities += [Entity(rule, value, 0, len(value), 0.85) for rule, value in secrets_seen]
         with tempfile.TemporaryDirectory() as tmp:  # never write scratch files into the workspace
             out = Path(tmp) / f"out{path.suffix}"
             redact_image(path, entities, out, aggressive=(kind == "redact_image"))

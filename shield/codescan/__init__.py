@@ -25,7 +25,7 @@ FIX_KINDS = [
     "ignore",
 ]
 
-SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__", ".next"}
+SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__", ".next", ".shield"}  # .shield holds backups of originals
 
 
 @dataclass
@@ -261,7 +261,8 @@ def scan(
 
     dedup: dict = {}
     for f in findings:
-        key = (f.file, f.line, f.col, f.rule)
+        # image/document findings all sit at line 0: the box tells them apart
+        key = (f.file, f.line, f.col, f.rule, tuple(f.bbox or ()), f.id if not f.line else "")
         if key not in dedup or ORDER.get(f.severity, 9) < ORDER.get(dedup[key].severity, 9):
             dedup[key] = f
     findings = sorted(dedup.values(), key=lambda f: (ORDER.get(f.severity, 9), f.file, f.line, f.rule))

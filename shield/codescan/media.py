@@ -45,8 +45,12 @@ def bank_rm(path: str, root: Path = Path(".")):
 OCR_TYPES = {"IN_AADHAAR", "IN_PAN", "IN_UPI", "IN_IFSC", "MOBILE_IN", "CREDIT_CARD", "EMAIL_ADDRESS", "GEO_COORDINATES"}
 
 
-def _ocr_findings(path: Path, rel: str) -> list[Finding]:
-    """One finding per OCR'd value, pointing at the words' bounding box."""
+def _ocr_findings(path: Path, rel: str, values: list | None = None) -> list[Finding]:
+    """One finding per OCR'd value, pointing at the words' bounding box. `values` (optional) collects
+    (rule, raw value) for secrets so the redact fix can black them out; it never leaves the process."""
+    import re
+    from shield.codescan.secrets import CRITICAL, EXTRA_RULES, is_doc_example
+
     words = ocr_words(path)
     text, spans, pos = "", [], 0
     for w, box in words:
@@ -58,6 +62,8 @@ def _ocr_findings(path: Path, rel: str) -> list[Finding]:
         if ent.type not in OCR_TYPES:
             continue
         boxes = [b for a, z, b in spans if a < ent.end and z > ent.start]
+        if not boxes:
+            continue
         x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
         x1, y1 = max(b[0] + b[2] for b in boxes), max(b[1] + b[3] for b in boxes)
         out.append(Finding(
@@ -66,6 +72,61 @@ def _ocr_findings(path: Path, rel: str) -> list[Finding]:
             f"{ent.type} visible in image (OCR) at x={x0} y={y0} w={x1 - x0} h={y1 - y0}", mask(ent.value, ent.type),
             ["redact_image", "hash_pdq", "ignore"], confidence=round(min(ent.score, 0.8), 2), bbox=[x0, y0, x1 - x0, y1 - y0],
         ))
+
+    # Also detect hardcoded secrets & API keys on OCR'd text
+    norm_text = text.replace("—", "-").replace("–", "-").replace("“", '"').replace("”", '"')
+    seen_boxes: set[tuple[int, int]] = set()
+
+    for rule_name, rx in EXTRA_RULES.items():
+        for m in rx.finditer(norm_text):
+            val = m.group(0)
+            if is_doc_example(val):
+                continue
+            boxes = [b for a, z, b in spans if a < m.end() and z > m.start()]
+            if not boxes:
+                continue
+            x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+            x1, y1 = max(b[0] + b[2] for b in boxes), max(b[1] + b[3] for b in boxes)
+            if (x0, y0) in seen_boxes:
+                continue
+            seen_boxes.add((x0, y0))
+            if values is not None:
+                values.append((rule_name, val))
+            severity = "critical" if rule_name in CRITICAL else "high"
+            out.append(Finding(
+                fingerprint("OCR_SECRET", rel, f"{rule_name}@{x0},{y0}", val), "media", "OCR_SECRET",
+                severity, rel, 0, 0, 0, 0,
+                f"CRITICAL: Rotate this key now. {rule_name} visible in image (OCR) at x={x0} y={y0} w={x1 - x0} h={y1 - y0}", mask(val, rule_name),
+                ["redact_image", "hash_pdq", "ignore"], confidence=0.85, bbox=[x0, y0, x1 - x0, y1 - y0],
+            ))
+
+    # Also check space-split tokens that OCR fractured (e.g. sk-proj-... or gsk_...)
+    token_splits = [
+        ("OpenAI Token", re.compile(r"sk-proj-[\w\s-]{35,}")),
+        ("Groq Token", re.compile(r"gsk_[A-Za-z0-9\s]{35,}")),
+    ]
+    for rule_name, rx in token_splits:
+        for m in rx.finditer(norm_text):
+            raw = m.group(0)
+            collapsed = raw.replace(" ", "")
+            if (rule_name == "OpenAI Token" and len(collapsed) >= 48) or \
+               (rule_name == "Groq Token" and len(collapsed) >= 44):
+                boxes = [b for a, z, b in spans if a < m.end() and z > m.start()]
+                if not boxes:
+                    continue
+                x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+                x1, y1 = max(b[0] + b[2] for b in boxes), max(b[1] + b[3] for b in boxes)
+                if (x0, y0) in seen_boxes:
+                    continue
+                seen_boxes.add((x0, y0))
+                if values is not None:
+                    values.append((rule_name, collapsed))
+                out.append(Finding(
+                    fingerprint("OCR_SECRET", rel, f"{rule_name}@{x0},{y0}", collapsed), "media", "OCR_SECRET",
+                    "critical", rel, 0, 0, 0, 0,
+                    f"CRITICAL: Rotate this key now. {rule_name} visible in image (OCR) at x={x0} y={y0} w={x1 - x0} h={y1 - y0}", mask(collapsed, rule_name),
+                    ["redact_image", "hash_pdq", "ignore"], confidence=0.85, bbox=[x0, y0, x1 - x0, y1 - y0],
+                ))
     return out
 
 
