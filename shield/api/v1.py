@@ -236,6 +236,28 @@ async def swarm_events(job_id: str, since: int = 0):
     return EventSourceResponse(gen())
 
 
+@router.get("/scout/events", tags=["scout"])
+async def scout_events(job_id: str, since: int = 0):
+    """SSE: live discovery steps (firewall verdicts, search hits, pages fetched/blocked, image matches)."""
+    j = server._get(job_id)
+    if j.kind != "discovery":
+        raise HTTPException(409, "not a discovery job")
+
+    async def gen():
+        i = since
+        while True:
+            evs = (j.discovery or {}).get("events", [])
+            while i < len(evs):
+                yield {"event": "scout", "data": json.dumps(evs[i], default=str)}
+                i += 1
+            if j.status not in {"queued", "running"}:
+                yield {"event": "end", "data": json.dumps({"status": j.status, "crawl": (j.discovery or {}).get("crawl")})}
+                return
+            await asyncio.sleep(0.3)
+
+    return EventSourceResponse(gen())
+
+
 app.include_router(router)
 
 # MCP over Streamable HTTP at /mcp (same tools as `python -m shield.mcp` stdio); guarded by SHIELD_API_TOKEN like /api

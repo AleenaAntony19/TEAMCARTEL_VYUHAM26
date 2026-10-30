@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { api, poll, type Job } from "./api.ts";
 import { Stages } from "./Activity.tsx";
+import { Graph3D } from "./Graph3D.tsx";
+import { GraphModel, describeScout, host, type ScoutEvent } from "./graph.ts";
+import { LiveLog, type LogRow } from "./LiveLog.tsx";
 
 const TYPES = ["IN_AADHAAR", "IN_PAN", "CREDIT_CARD", "EMAIL_ADDRESS", "MOBILE_IN", "IN_BANK_ACCOUNT"];
 
@@ -17,8 +20,33 @@ export function Discovery({ analysisId, onJob }: { analysisId: string | null; on
   const [refLabel, setRefLabel] = useState("");
   const [authorized, setAuthorized] = useState(false);
   const stop = useRef<() => void>(() => {});
+  const es = useRef<EventSource | null>(null);
+  const model = useRef(new GraphModel());
+  const [rows, setRows] = useState<LogRow[]>([]);
+  const [tick, setTick] = useState(0);
+  const [pulses, setPulses] = useState<string[]>([]);
+  const [now, setNow] = useState<{ url?: string; pages?: number; images?: number; blocked?: number }>({});
 
-  useEffect(() => { api.references().then((r) => setRefs(r.references), () => undefined); return () => stop.current(); }, []);
+  useEffect(() => { api.references().then((r) => setRefs(r.references), () => undefined); return () => { stop.current(); es.current?.close(); }; }, []);
+
+  const watch = (id: string) => {
+    es.current?.close();
+    model.current = new GraphModel();
+    setRows([]); setNow({});
+    const src = new EventSource(api.scoutEventsUrl(id));
+    es.current = src;
+    src.addEventListener("scout", (m) => {
+      const ev = JSON.parse((m as MessageEvent).data) as ScoutEvent & { pages?: number; images?: number; blocked?: number };
+      setPulses(model.current.applyScout(ev));
+      setTick((t) => t + 1);
+      if (ev.kind === "crawl_progress") setNow({ url: ev.url, pages: ev.pages, images: ev.images, blocked: ev.blocked });
+      const who = ev.kind === "query" ? "QueryFirewall" : ev.url ? host(ev.url) : "scout";
+      setRows((r) => [...r, { ts: ev.ts, who, text: describeScout(ev), tone: ev.kind === "query" ? "persona" : "site",
+        level: ev.kind === "match" || (ev.kind === "query" && !ev.allowed) ? "warn" : ev.kind === "blocked" || ev.kind === "crawl_error" ? "error" : "info" }]);
+    });
+    src.addEventListener("end", () => src.close());
+    src.onerror = () => src.close();
+  };
 
   const start = async () => {
     setError("");
@@ -26,6 +54,7 @@ export function Discovery({ analysisId, onJob }: { analysisId: string | null; on
       const { id } = await api.discover({ org, domain, entity_types: types, crawl, job_id: linkJob && analysisId ? analysisId : undefined });
       stop.current();
       stop.current = poll(id, (j) => { setJob(j); onJob(j); }, (e) => setError(e.message));
+      watch(id);
     } catch (e) { setError((e as Error).message); }
   };
 
@@ -73,6 +102,27 @@ export function Discovery({ analysisId, onJob }: { analysisId: string | null; on
         <button disabled={!refFile || !authorized} onClick={addRef}>Add reference</button>
         <ul>{refs.map((r) => <li key={r.id}>{r.label}</li>)}</ul>
       </section>
+
+      {job && (
+        <section className="card wide">
+          <h2>Live scout {job.status === "running" || job.status === "queued" ? <span className="pill">working</span> : <span className="pill ok">{job.status}</span>}</h2>
+          <div className="nowbar small">
+            <span className="dot-live" aria-hidden />
+            <span className="mono">{now.url ? `scraping ${now.url}` : rows.length ? "searching…" : "starting…"}</span>
+            <span className="muted">pages {now.pages ?? 0} · images {now.images ?? 0} · blocked {now.blocked ?? 0}</span>
+          </div>
+          <div className="sites">
+            {model.current.nodes.filter((n) => n.kind === "site").map((n) => (
+              <div key={n.id} className={`site st-${n.status}`}>
+                <b className="mono">{n.label}</b>
+                <span className="small muted">{n.calls} page{n.calls === 1 ? "" : "s"} · {n.status === "match" ? "⚠ match" : n.status === "blocked" ? "blocked" : "ok"}</span>
+              </div>
+            ))}
+          </div>
+          <Graph3D model={model.current} tick={tick} pulses={pulses} height={360} title="Scout crawl graph" />
+          <LiveLog rows={rows} />
+        </section>
+      )}
 
       {d && (
         <section className="card wide">

@@ -1,49 +1,52 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type Redaction } from "./api.ts";
+import { Graph3D } from "./Graph3D.tsx";
+import { GraphModel, describeAgent, roleOf, type AgentEvent } from "./graph.ts";
+import { LiveLog, type LogRow } from "./LiveLog.tsx";
 
-interface AgentEvent { agent: string; event: string; action?: string; child?: string; tools?: string[]; observation?: string; ms?: number; error?: string; decisions?: number; fail_safe?: number; round?: number }
 interface AgentSummary { name: string; steps: number; tokens: number; tools: string[]; error: string; children: AgentSummary[] }
 interface SwarmResult { clean: boolean; cycles: number; llm_calls: number; tool_calls: number; tokens: number; fail_safe_defaults: number;
   decisions: { finding_id: string; action: string; reason: string }[]; agents: AgentSummary[] }
 
-// Binding LLM agent swarm: live SSE log of real tool calls, then the verified result it produced.
+// Binding LLM agent swarm: 3D graph + live log driven by the real SSE events, then the verified result.
 export function Swarm({ jobId, onDone }: { jobId: string; onDone: (r: Redaction | null) => void }) {
-  const [events, setEvents] = useState<AgentEvent[]>([]);
+  const model = useRef(new GraphModel());
+  const [rows, setRows] = useState<LogRow[]>([]);
+  const [tick, setTick] = useState(0);
+  const [pulses, setPulses] = useState<string[]>([]);
+  const [filter, setFilter] = useState<string>();
   const [status, setStatus] = useState<"idle" | "running" | "done" | "failed">("idle");
   const [result, setResult] = useState<SwarmResult | null>(null);
   const [error, setError] = useState("");
   const es = useRef<EventSource | null>(null);
   useEffect(() => () => es.current?.close(), []);
+  const select = useCallback((id: string) => setFilter(id.replace(/^agent:/, "")), []);
 
   const start = async () => {
-    setError(""); setEvents([]); setResult(null);
+    setError(""); setRows([]); setResult(null); setFilter(undefined);
+    model.current = new GraphModel();
     try {
       await api.swarmRun(jobId);
     } catch (e) { setError((e as Error).message); return; }
     setStatus("running");
     const src = new EventSource(api.swarmEventsUrl(jobId));
     es.current = src;
-    src.addEventListener("agent", (m) => setEvents((x) => [...x, JSON.parse((m as MessageEvent).data)]));
+    src.addEventListener("agent", (m) => {
+      const ev = JSON.parse((m as MessageEvent).data) as AgentEvent & { observation?: string };
+      setPulses(model.current.applyAgent(ev));
+      setTick((t) => t + 1);
+      setRows((r) => [...r, { ts: ev.ts, who: ev.agent ?? "?", text: describeAgent(ev), tone: roleOf(ev.agent ?? ""), level: ev.event === "error" ? "error" : "info" }]);
+    });
     src.addEventListener("end", async (m) => {
       src.close();
       const end = JSON.parse((m as MessageEvent).data);
       setStatus(end.status === "done" ? "done" : "failed");
       setResult(end.result);
+      if (end.result?.agents) { model.current.applyTotals(end.result.agents); setTick((t) => t + 1); }
       if (end.error) setError(end.error);
       onDone((await api.job(jobId)).redaction);
     });
     src.onerror = () => { src.close(); setStatus((s) => (s === "running" ? "failed" : s)); };
-  };
-
-  const line = (e: AgentEvent) => {
-    if (e.event === "spawn") return `spawned ${e.child} with [${e.tools?.join(", ")}]`;
-    if (e.event === "tool") return `→ ${e.action} (${e.ms} ms) ${(e.observation ?? "").slice(0, 160)}`;
-    if (e.event === "final") return "returned its verdict";
-    if (e.event === "round") return `round ${e.round} finished`;
-    if (e.event === "binding_plan") return `binding plan: ${e.decisions} decisions${e.fail_safe ? `, ${e.fail_safe} fail-safe` : ""}`;
-    if (e.event === "redaction" || e.event === "refactor") return `executed: ${(e.observation ?? "").slice(0, 160)}`;
-    if (e.event === "error") return `error: ${e.error}`;
-    return e.event;
   };
 
   return (
@@ -51,19 +54,16 @@ export function Swarm({ jobId, onDone }: { jobId: string; onDone: (r: Redaction 
       <h2>AI agent swarm <span className="muted small">(binding)</span></h2>
       <p className="muted small">
         MetaPlanner spawns specialists → PrivacyHawk / PragmaticDev / StatutoryAuditor debate → FormatGuard optimizes → SwarmAdjudicator's plan is
-        executed → red team attacks (up to 3 cycles). Agents act through real MCP tools and see masked values only. Verified identifiers, PAN,
-        bank, passport, UPI, GSTIN, coordinates and faces are always redacted whatever an agent says.
+        executed → red team attacks (up to 3 cycles). Every dot travelling along a link is a real message or MCP tool call. Agents see masked values
+        only; verified identifiers, PAN, bank, passport, UPI, GSTIN, coordinates and faces are always redacted whatever an agent says.
       </p>
       <button className="primary" disabled={status === "running"} onClick={start}>{status === "running" ? "Agents working…" : "Run AI agent swarm"}</button>
       {error && <div className="banner error">{error}</div>}
-      {events.length > 0 && (
-        <ol className="agentlog" aria-live="polite">
-          {events.map((e, i) => (
-            <li key={i} className={`ev-${e.event}`} style={{ paddingLeft: `${(e as { depth?: number }).depth ? 16 : 0}px` }}>
-              <b>{e.agent}</b> <span className="small">{line(e)}</span>
-            </li>
-          ))}
-        </ol>
+      {status !== "idle" && (
+        <>
+          <Graph3D model={model.current} tick={tick} pulses={pulses} onSelect={select} title="Agent communication graph" />
+          <LiveLog rows={rows} filter={filter} onClearFilter={() => setFilter(undefined)} />
+        </>
       )}
       {result && (
         <>

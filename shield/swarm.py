@@ -16,6 +16,7 @@ included as evidence, and dismissed placeholders never reach the swarm.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Callable
 
 from . import llm
@@ -74,7 +75,7 @@ async def run_agentic(session_id: str, cfg: llm.LLMConfig, on_event: Callable[[d
 
     def emit(**ev):
         if on_event:
-            on_event(ev)
+            on_event({"ts": time.time(), **ev})
 
     if not findings:
         return {"clean": True, "cycles": 0, "decisions": [], "agents": [], "tokens": 0, "llm_calls": 0, "tool_calls": 0, "kind": kind}

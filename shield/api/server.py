@@ -694,6 +694,8 @@ def _discover(job: Job, req: DiscoveryRequest, blocked_values: list[str]) -> Non
                 job.stages[-1].detail = f"{provider.name} error: {type(exc).__name__}"
                 continue
             for h in hits:
+                if any(r["source_url"] == h.get("url", "") and r["match_type"] == "text_search" for r in results):
+                    continue  # several queries often return the same page
                 excerpt = h.get("snippet", "")
                 for e in detect(excerpt):
                     excerpt = excerpt.replace(e.value, mask_value(e.value))
@@ -703,6 +705,7 @@ def _discover(job: Job, req: DiscoveryRequest, blocked_values: list[str]) -> Non
                     "score": None, "evidence_status": "candidate: needs human review", "query": q,
                     "provider": h.get("provider", provider.name), "tier": h.get("tier"),
                 })
+                _scout_event(job, {"kind": "search_hit", "url": h.get("url", ""), "provider": provider.name, "query": q})
 
     _run_stage(job, f"search:{provider.name}", run_search)
     job.ledger.append("scout", "SEARCH", {"provider": provider.name, "queries": len(checked),
@@ -743,6 +746,7 @@ async def _crawl(job: Job, results: list[dict], use_faces: bool = False) -> None
                 "thumb_b64": base64.b64encode(m.thumb_jpeg).decode(),  # 128 px, Gaussian radius 25: for review, not redaction
                 "evidence_status": f"confirmed: {m.kind} strong match" if m.verdict == "confirmed" else "candidate: needs human review",
             })
+            _scout_event(job, {"kind": "match", "url": m.page_url, "image_url": m.image_url, "match": m.kind, "verdict": m.verdict})
 
     async def on_event(ev):
         _scout_event(job, ev)  # page fetched / blocked / robots-denied / error: public URLs and counters only
