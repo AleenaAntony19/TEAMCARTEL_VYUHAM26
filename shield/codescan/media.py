@@ -42,7 +42,7 @@ def bank_rm(path: str, root: Path = Path(".")):
     bank.save(root / BANK_REL)
 
 
-OCR_TYPES = {"IN_AADHAAR", "IN_PAN", "IN_UPI", "IN_IFSC", "MOBILE_IN", "CREDIT_CARD", "EMAIL_ADDRESS"}
+OCR_TYPES = {"IN_AADHAAR", "IN_PAN", "IN_UPI", "IN_IFSC", "MOBILE_IN", "CREDIT_CARD", "EMAIL_ADDRESS", "GEO_COORDINATES"}
 
 
 def _ocr_findings(path: Path, rel: str) -> list[Finding]:

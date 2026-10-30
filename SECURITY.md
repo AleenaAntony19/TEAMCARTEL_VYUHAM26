@@ -8,6 +8,7 @@
 | When | What | Where |
 |---|---|---|
 | LLM provider configured and "Explain" used | finding type, rule, engine, severity, confidence, layer, masked evidence | Groq or Anthropic endpoint (https only) |
+| Agent swarm run (opt-in) | masked findings, masked tool observations (OCR text is masked), agent prompts | Groq or Anthropic endpoint |
 | LLM provider configured and discovery run | org, domain, entity type names | same |
 | Search provider configured | firewall-approved query strings (org/domain + generic terms) | Brave or Google Programmable Search |
 | Discovery crawl requested | HTTP GETs to registry seed domains | those sites |
@@ -25,7 +26,15 @@
 - **Secrets**: LLM keys come from env or are set at runtime into process memory (web) / VS Code Secret Storage (extension). They are never echoed by the API, never logged, and are cleared by "Clear session data". `.githooks/pre-commit` (enable with `git config core.hooksPath .githooks`) blocks commits with secrets or Indian PII.
 - **Biometrics**: the web/API flow does face *region detection* only, to support opaque removal of photos. Face recognition vectors exist only in the opt-in Streamlit likeness demo (consent + selfie match, memory only).
 
+## Agent swarm guarantees
+- Tools address findings by id; raw values stay in the engine process.
+- The redaction tool enforces a floor that no LLM verdict can lower.
+- A "keep" must be grounded in a PragmaticDev challenge.
+- The workspace swarm writes code only through `refactor_code_secret`, which checks Python with `ast` and backs up the original first. The VS Code command asks for confirmation.
+- MCP file access is limited to `SHIELD_MCP_ROOT`.
+
 ## Known limits
+- Small/free LLM tiers rate-limit hard (Groq free tier is about 8k tokens per minute). Runs slow down instead of failing (header-based pacing plus retry-after), and any finding without a decision is redacted.
 - OCR quality bounds image redaction: text tesseract cannot read is neither detected nor redacted. Verification OCRs the output again, but it uses the same engine family.
 - Face redaction in PDFs removes the whole placed image that contains a face. DOCX/XLSX embedded photos are reported but not auto-redacted.
 - The bundled demo face is a drawing that YuNet does not detect, so the demo PDF photo is not flagged as a face.

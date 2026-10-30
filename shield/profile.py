@@ -8,7 +8,10 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 import pymupdf
-import pytesseract
+try:
+    import pytesseract
+except ImportError:
+    pytesseract = None
 from PIL import Image
 
 from .detect import detect
@@ -47,6 +50,10 @@ DOMAIN_KEYWORDS = {
 def layer_texts(path: Path) -> dict[str, str]:
     """Text per document layer. Entity offsets are relative to their layer's text."""
     suffix = path.suffix.lower()
+    if suffix in {".csv", ".json"}:
+        from .extractor import ExtractorAgent  # owns the CSV/JSON normalisation ("data" layer)
+
+        return ExtractorAgent()._extract(path).layers
     if suffix == ".pdf":
         with pymupdf.open(path) as doc:
             visible = "".join(p.get_text() for p in doc)
@@ -72,7 +79,7 @@ def layer_texts(path: Path) -> dict[str, str]:
         exif = "\n".join(str(v) for v in img.getexif().values() if isinstance(v, (str, bytes)))
         exif += "\n" + "\n".join(str(v) for v in img.info.values() if isinstance(v, str))
         try:
-            ocr = pytesseract.image_to_string(img)
+            ocr = pytesseract.image_to_string(img, config="--psm 6")  # row-wise: keeps table rows (lat/long pairs) together
         except Exception:
             ocr = ""
         return {"ocr": ocr, "exif": exif}
@@ -153,51 +160,72 @@ def profile(path: str | Path) -> Profile:
     )
 
 
+def _layer_job(path: Path, wanted: set[str] | None = None, types: set[str] | None = None, prefix: str = "") -> Callable[[], dict]:
+    """A specialist's real work: extract its layers and count the detections it owns (no values)."""
+
+    def run() -> dict:
+        layers = layer_texts(path)
+        if wanted:
+            layers = {k: v for k, v in layers.items() if k in wanted}
+        counts: dict[str, int] = {}
+        for name, text in layers.items():
+            for e in detect(text, layer=name):
+                if (types is None or e.type in types) and e.type.startswith(prefix):
+                    counts[e.type] = counts.get(e.type, 0) + 1
+        return {"layers": {k: len(v) for k, v in layers.items()}, "detections": counts}
+
+    return run
+
+
+def _faces_job(path: Path) -> Callable[[], dict]:
+    def run() -> dict:
+        from . import face
+
+        found = 0
+        for _, img, _ in extract_images(path):
+            try:
+                found += len(face.detect_faces(img))
+            except FileNotFoundError:
+                return {"error": "face models missing (scripts/get_models.sh)"}
+        return {"images": len(extract_images(path)), "face_regions": found}
+
+    return run
+
+
+def _health_job(path: Path) -> Callable[[], dict]:
+    def run() -> dict:
+        text = "\n".join(layer_texts(path).values()).lower()
+        return {"keywords": {w: text.count(w) for w in DOMAIN_KEYWORDS["HEALTHCARE_MEDICAL"] if w in text}}
+
+    return run
+
+
 class AgentFactory:
+    """Spawns only the specialists a document needs; each `run` performs that specialist's extraction/detection."""
+
     @staticmethod
     def spawn(p: Profile, path: str | Path) -> list[Agent]:
-        agents: list[Agent] = []
+        path = Path(path)
         fmt = p.file_format
-        if fmt == "PDF":
-            agents.append(Agent("fmt_pdf", "PdfStreamInspector", "visible", "stream", lambda: None))
-        elif fmt == "DOCX":
-            agents.append(Agent("fmt_docx", "DocxXmlInspector", "ooxml", "xml", lambda: None))
-        elif fmt == "XLSX":
-            agents.append(Agent("fmt_xlsx", "SheetCacheInspector", "ooxml", "xml", lambda: None))
-        else:
-            agents.append(Agent("fmt_img", "OcrVisualInspector", "ocr", "vision", lambda: None))
-
+        fmt_agent = {
+            "PDF": ("fmt_pdf", "PdfStreamInspector", {"visible", "annotations", "embedded"}),
+            "DOCX": ("fmt_docx", "DocxXmlInspector", {"ooxml"}),
+            "XLSX": ("fmt_xlsx", "SheetCacheInspector", {"ooxml"}),
+        }.get(fmt, ("fmt_img", "OcrVisualInspector", {"ocr", "text", "data"}))
+        agents = [Agent(fmt_agent[0], fmt_agent[1], ",".join(sorted(fmt_agent[2])), "extract+detect", _layer_job(path, fmt_agent[2]))]
         if "INDIA" in p.locale_hints:
-            agents.append(Agent("in_kyc", "IndiaKycSpecialist", "visible", "regex", lambda: None))
+            agents.append(Agent("in_kyc", "IndiaKycSpecialist", "all", "detect", _layer_job(path, prefix="IN_")))
         if "FINANCIAL_BANKING" in p.domain_tags:
-            agents.append(Agent("fin", "FinSecSpecialist", "visible", "regex", lambda: None))
+            agents.append(Agent("fin", "FinSecSpecialist", "all", "detect", _layer_job(path, types={"CREDIT_CARD", "IN_IFSC", "IN_BANK_ACCOUNT", "IN_UPI"})))
         if "HEALTHCARE_MEDICAL" in p.domain_tags:
-            agents.append(Agent("health", "HealthSpecialist", "visible", "regex", lambda: None))
+            agents.append(Agent("health", "HealthSpecialist", "all", "keywords", _health_job(path)))
         if p.has_images:
-            agents.append(
-                Agent("visual", "VisualLikenessAgent", "images", "face", lambda: None)
-            )
-        agents.append(Agent("meta", "MetadataInspector", "metadata", "meta", lambda: None))
-        agents.append(Agent("redteam", "RedTeamAttacker", "output", "attack", lambda: None))
+            agents.append(Agent("visual", "VisualLikenessAgent", "images", "face-regions", _faces_job(path)))
+        agents.append(Agent("meta", "MetadataInspector", "metadata,exif", "detect", _layer_job(path, {"metadata", "exif"})))
         return agents
 
     @staticmethod
-    def spawn_scout(registry: list[dict], enrolled: bool) -> list[Agent]:
-        agents: list[Agent] = []
-        for row in registry:
-            agents.append(
-                Agent(
-                    f"crawl_{row['domain']}_{row['category']}",
-                    f"{row['category'].title()}Crawler@{row['domain']}",
-                    "web",
-                    "crawl",
-                    lambda: None,
-                )
-            )
-        agents.append(Agent("pdq", "PdqMatcher", "images", "pdq", lambda: None))
-        if enrolled:
-            agents.append(Agent("face", "FaceMatcher", "images", "face", lambda: None))
-        agents.append(Agent("firewall", "QueryFirewall", "queries", "text", lambda: None))
-        agents.append(Agent("evidence", "EvidenceAgent", "review", "capture", lambda: None))
-        return agents
-
+    def spawn_scout(registry: list[dict], enrolled: bool) -> list[str]:
+        """Names of the scout stages that actually run in run_scout (crawlers per seed, matchers, firewall)."""
+        names = [f"{row['category'].title()}Crawler@{row['domain']}" for row in registry]
+        return names + ["PdqMatcher"] + (["FaceMatcher"] if enrolled else []) + ["QueryFirewall"]

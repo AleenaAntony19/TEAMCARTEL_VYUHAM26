@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, defaultSelection, poll, type Action, type Config, type Finding, type Job, type Redaction } from "./api.ts";
 import { Stages } from "./Activity.tsx";
+import { Swarm } from "./Swarm.tsx";
 
 interface Props { config: Config | null; jobId: string | null; setJobId: (id: string | null) => void; onJob: (j: Job) => void }
 
@@ -123,6 +124,7 @@ function Review({ job }: { job: Job }) {
                     <td><input type="checkbox" aria-label={`Select ${f.type}`} disabled={!f.actions.length} checked={!!sel[f.id]} onChange={() => toggle(f)} /></td>
                     <td>
                       <strong>{f.type}</strong>
+                      {!!f.opinions?.length && <span className="muted small"> · {f.opinions.filter((o) => o.stance === "redact").length}/{f.opinions.length} AI: redact</span>}
                       <div className="muted small">{f.analyzer}</div>
                     </td>
                     <td><span className={`sev sev-${f.severity}`}>{f.severity}</span></td>
@@ -134,6 +136,12 @@ function Review({ job }: { job: Job }) {
                         <summary>Why &amp; checks</summary>
                         <p>{f.recommendation}</p>
                         <ul>{f.checks.map((c, i) => <li key={i}>{c.passed ? "✓" : "✗"} <b>{c.reviewer}</b> · {c.rule}: {c.evidence}</li>)}</ul>
+                        {!!f.opinions?.length && (
+                          <ul className="llm">
+                            {f.opinions.map((o) => <li key={o.persona}><b>{o.persona}</b> (AI) → {o.stance}: {o.reason}</li>)}
+                            <li className="muted">AI persona opinions are advice, not evidence; verdicts come from the checks above.</li>
+                          </ul>
+                        )}
                         {explained[f.id] ? <p className="llm">{explained[f.id]}<br /><span className="muted">AI explanation: advice, not evidence.</span></p> : (
                           <button className="link" onClick={() => run(async () => { const r = await api.explain(job.id, f.id); setExplained((x) => ({ ...x, [f.id]: r.explanation })); })}>
                             Explain with AI (sends type and masked evidence only)
@@ -187,6 +195,8 @@ function Review({ job }: { job: Job }) {
           )}
         </section>
       )}
+
+      <Swarm jobId={job.id} onDone={(r) => { setPreview(null); setResult(r); }} />
 
       {result && (
         <section className="card wide">

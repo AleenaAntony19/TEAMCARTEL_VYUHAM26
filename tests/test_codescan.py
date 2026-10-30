@@ -149,3 +149,11 @@ def test_hash_pdq_adds_to_bank_without_touching_image(repo, fx):
     bank = json.loads((r / ".shield/bank.json").read_text())
     assert bank and img.read_bytes() == before
     assert "hash_pdq" in __import__("shield.codescan", fromlist=["FIX_KINDS"]).FIX_KINDS
+
+
+def test_fake_pii_value_is_not_reflagged(repo):
+    r, _ = repo
+    res = scan(r, engines=["pii"], ocr=False)
+    pii = next(f for f in res["findings"] if f["rule"] == "IN_AADHAAR")
+    apply_plan(plan_fix(r, pii, "fake_pii"), r)
+    assert not [f for f in scan(r, engines=["pii"], ocr=False)["findings"] if f["rule"] == "IN_AADHAAR" and f["file"] == "tests/users.json"]

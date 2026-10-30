@@ -4,7 +4,7 @@ import { runPython } from "./runner.ts";
 
 type Provider = "none" | "groq" | "anthropic";
 const KEY_ENV: Record<Exclude<Provider, "none">, string> = { groq: "GROQ_API_KEY", anthropic: "ANTHROPIC_API_KEY" };
-const DEFAULT_MODEL: Record<Exclude<Provider, "none">, string> = { groq: "llama-3.3-70b-versatile", anthropic: "claude-haiku-5-5" };
+const DEFAULT_MODEL: Record<Exclude<Provider, "none">, string> = { groq: "openai/gpt-oss-20b", anthropic: "claude-haiku-5-5" };
 const secretId = (p: string) => `shieldCode.llmKey.${p}`;
 
 /** Env for `python -m shield.llm`, with the key from VS Code Secret Storage; null when not configured. */

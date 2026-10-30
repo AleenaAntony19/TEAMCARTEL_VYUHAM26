@@ -4,9 +4,10 @@ from pathlib import Path
 
 from shield.detect import detect
 
+from .fix import FAKE_VALUES
 from . import Finding, evidence, fingerprint, mask, record_error
 
-KEEP = {"IN_AADHAAR", "IN_PAN", "IN_GSTIN", "IN_PASSPORT", "IN_UPI", "IN_BANK_ACCOUNT", "CREDIT_CARD", "EMAIL_ADDRESS", "MOBILE_IN"}
+KEEP = {"IN_AADHAAR", "IN_PAN", "IN_GSTIN", "IN_PASSPORT", "IN_UPI", "IN_BANK_ACCOUNT", "CREDIT_CARD", "EMAIL_ADDRESS", "MOBILE_IN", "GEO_COORDINATES"}
 
 
 def scan_pii(files: list[Path], root: Path, existing: list[Finding] | None = None) -> list[Finding]:
@@ -21,8 +22,8 @@ def scan_pii(files: list[Path], root: Path, existing: list[Finding] | None = Non
         lines = text.splitlines()
         for i, line in enumerate(lines, 1):
             for ent in detect(line):
-                if ent.type not in KEEP:
-                    continue
+                if ent.type not in KEEP or ent.value == FAKE_VALUES.get(ent.type):
+                    continue  # our own synthetic test values (fake_pii) are not findings
                 if ent.type == "EMAIL_ADDRESS" and any(
                     d in ent.value for d in ("example.com", ".test", "noreply")
                 ):

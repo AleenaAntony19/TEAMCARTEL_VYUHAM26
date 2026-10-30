@@ -5,7 +5,10 @@ import zipfile
 from pathlib import Path
 
 import pymupdf
-import pytesseract
+try:
+    import pytesseract
+except ImportError:
+    pytesseract = None
 from PIL import Image
 
 from .detect import detect, variants

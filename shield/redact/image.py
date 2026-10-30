@@ -2,13 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytesseract
+try:
+    import pytesseract
+except ImportError:
+    pytesseract = None
 from PIL import Image, ImageDraw
 
 from ..detect import variants
 
 
 def ocr_words(path: str | Path) -> list[tuple[str, tuple[int, int, int, int]]]:
+    if pytesseract is None:
+        return []
     img = Image.open(path).convert("RGB")
     data = pytesseract.image_to_data(
         img, output_type=pytesseract.Output.DICT, config="--psm 6"

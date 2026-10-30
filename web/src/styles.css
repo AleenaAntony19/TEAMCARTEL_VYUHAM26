@@ -87,3 +87,6 @@ table { border-collapse: collapse; width: 100%; }
 .llm { border-left: 3px solid var(--accent); padding-left: 8px; }
 details summary { cursor: pointer; color: var(--accent); }
 .hash { overflow-wrap: anywhere; }
+.agentlog { max-height: 320px; overflow: auto; font-size: 0.85rem; padding-left: 20px; }
+.agentlog li { padding: 2px 0; overflow-wrap: anywhere; }
+.agentlog .ev-error { color: var(--bad); }

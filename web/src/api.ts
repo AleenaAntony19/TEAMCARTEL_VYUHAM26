@@ -8,6 +8,7 @@ export interface Finding {
   id: string; type: string; severity: Severity; confidence: number; layer: string;
   location: { layer: string; start?: number; end?: number; where?: string; bbox?: string | null };
   masked: string; evidence: string; analyzer: string; checks: Check[]; recommendation: string; actions: Action[];
+  opinions?: { persona: string; stance: "redact" | "keep" | "unsure"; reason: string }[];
 }
 export interface Stage { name: string; status: string; detail: string; ms: number }
 export interface AttackCheck { name: string; passed: boolean; evidence: string[] }
@@ -87,6 +88,8 @@ export const api = {
     return call<{ id: string; stored: string }>("/api/references", { method: "POST", body: f });
   },
   references: () => call<{ references: { id: string; label: string }[]; hash_rows: number }>("/api/references"),
+  swarmRun: (job_id: string) => call<{ status: string }>("/api/v1/swarm/run", { method: "POST", body: json({ job_id }) }),
+  swarmEventsUrl: (job_id: string) => `/api/v1/swarm/events?job_id=${encodeURIComponent(job_id)}`,
   llm: () => call<LLMState>("/api/llm"),
   setLlm: (body: { provider: string; model: string; endpoint: string; api_key: string; timeout: number; retries: number }) =>
     call<LLMState>("/api/llm", { method: "PUT", body: json(body) }),
@@ -103,7 +106,8 @@ export function poll(id: string, onUpdate: (j: Job) => void, onError: (e: Error)
     try {
       const j = await api.job(id);
       onUpdate(j);
-      if (j.status === "queued" || j.status === "running") setTimeout(tick, everyMs);
+      // keep polling while background stages (e.g. AI personas) are still running after the job is ready
+      if (j.status === "queued" || j.status === "running" || j.stages.some((s) => s.status === "running")) setTimeout(tick, everyMs);
     } catch (e) { onError(e as Error); }
   };
   tick();
