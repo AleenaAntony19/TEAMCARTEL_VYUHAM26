@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 from pathlib import Path
 from typing import AsyncIterator, Iterator
 
@@ -68,8 +69,16 @@ def run_document(src: str | Path, work: str | Path, ledger: Ledger) -> Iterator[
     yield {"kind": "review", "records": [asdict(r) for r in review_records]}
 
     ledger.append("DETECT", {"counts": _counts(entities)})
-    score, band_str, types = severity(entities)
-    yield {"kind": "detect", "counts": _counts(entities), "severity": band_str, "score": score}
+    sev = severity(entities)
+    score, band_str, types = sev[0], sev[1], sev[2]
+    ranked_entities = [asdict(r) for r in getattr(sev, "ranked_entities", [])]
+    yield {
+        "kind": "detect",
+        "counts": _counts(entities),
+        "severity": band_str,
+        "score": score,
+        "ranked_entities": ranked_entities,
+    }
 
     out = redact(src, entities, work, aggressive=False)
     yield {"kind": "redact", "output": str(out), "sha256": sha256_file(out)}
@@ -100,6 +109,7 @@ def run_document(src: str | Path, work: str | Path, ledger: Ledger) -> Iterator[
         "severity": band_str,
         "score": score,
         "types": types,
+        "ranked_entities": ranked_entities,
         "review": [asdict(r) for r in review_records],
         "attacks": [{"name": a.name, "passed": a.passed, "evidence": a.evidence} for a in attacks],
         "status": status,

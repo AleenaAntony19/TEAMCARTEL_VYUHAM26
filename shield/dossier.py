@@ -43,9 +43,23 @@ def _pdf(path: Path, report: dict):
     for title, body in sections:
         page = doc.new_page(width=595, height=842)
         page.insert_textbox(pymupdf.Rect(50, 50, 545, 120), title, fontsize=16, fontname="helv")
+        body_text = body + "\n\n"
+        doc_rep = report.get("doc") or {}
+        if title == "Document Redaction" and doc_rep.get("ranked_entities"):
+            body_text += "PRIORITIZED PRIVACY SEVERITY RANKINGS (5-Factor Metric):\n"
+            for r in doc_rep["ranked_entities"][:10]:
+                f = r.get("factors", {})
+                body_text += (
+                    f"• Rank #{r['rank']}: {r['entity_type']} ({r['masked_value']}) "
+                    f"— Score: {r['severity_score']} [{r['band']}]\n"
+                    f"  Sensitivity(30%): {f.get('intrinsic_sensitivity', 0):.0f} | Exploitability(20%): {f.get('exploitability', 0):.0f} | "
+                    f"Linkability(25%): {f.get('linkability', 0):.0f} | Context(15%): {f.get('exposure_context', 0):.0f} | Frequency(10%): {f.get('frequency', 0):.0f}\n"
+                )
+            body_text += "\n"
+        body_text += textwrap.fill(json.dumps(report, indent=2, default=str)[:3000], 90)
         page.insert_textbox(
             pymupdf.Rect(50, 130, 545, 780),
-            body + "\n\n" + textwrap.fill(json.dumps(report, indent=2, default=str)[:3500], 90),
+            body_text,
             fontsize=8,
             fontname="helv",
         )
