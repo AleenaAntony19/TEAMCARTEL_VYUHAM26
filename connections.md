@@ -21,6 +21,13 @@ VS Code (vscode/) ── spawn python -m shield.codescan / shield.llm (JSON on s
 
 The unversioned `/api/*` routes used by the bundled React app are documented in [docs/API.md](docs/API.md).
 
+## MCP (Model Context Protocol)
+- **stdio**: `python -m shield.mcp`. Use `SHIELD_MCP_ROOT` to limit which files a client may open. The VS Code command "Shield: Run AI Agent Swarm on Workspace (MCP)" uses this transport via `@modelcontextprotocol/sdk`.
+- **Streamable HTTP**: `POST /mcp/` on the API (stateless JSON responses). It needs `SHIELD_API_TOKEN` when that is set.
+- **Tools**: `open_document`, `list_findings`, `validate_checksum`, `extract_ocr_region`, `compute_perceptual_pdq`, `compute_pca_projection`, `measure_layout`, `execute_destructive_redaction`, `adversarial_penetration_test`, `open_workspace`, `list_code_findings`, `refactor_code_secret`, `rescan_workspace`, `run_agent_swarm`. In-process agents also get `spawn_specialist_agent`.
+- **Resources**: `shield://doc/{id}/metadata`, `shield://doc/{id}/layers` (masked), `shield://ledger/{job_id}/chain`.
+- **Swarm over HTTP**: `POST /api/v1/swarm/run {job_id}` starts the run; `GET /api/v1/swarm/events?job_id=` streams it as SSE (spawns, tool calls with masked observations, binding plan, end with token totals). Every tool call is chained into the job's SHA-256 ledger.
+
 ## VS Code ⇄ engine
 - Scan: `python -m shield.codescan scan <root> --format json --workers N --timeout S [--no-ocr] [--exclude G] [--files F…]`. Exit 0 means clean, 1 means critical/high findings; any other code is an error.
 - Fix: `… fix <root> --id <finding> --kind <kind> [--file F] --dry-run` returns the plan (edits and op summaries, never the secret). Without `--dry-run` it applies the plan after the user confirms in VS Code.

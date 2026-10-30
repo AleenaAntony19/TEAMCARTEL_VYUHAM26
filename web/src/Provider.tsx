@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type LLMState } from "./api.ts";
 
 const PRESETS = {
-  groq: { label: "Groq", note: "Development: fast hosted open models.", model: "llama-3.3-70b-versatile" },
+  groq: { label: "Groq", note: "Development: fast hosted open models.", model: "openai/gpt-oss-20b" },
   anthropic: { label: "Anthropic Claude", note: "Production: Claude via the Anthropic API.", model: "claude-haiku-5-5" },
 } as const;
 

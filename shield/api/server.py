@@ -33,7 +33,7 @@ from ..detect import detect, replacement
 from ..ledger import Ledger
 from ..models import BASE, SFACE, YUNET, Entity
 from ..redact import redact, redact_text
-from ..review import mask_value, review
+from ..review import mask_value
 
 log = logging.getLogger("shield.api")
 
@@ -54,7 +54,7 @@ SEVERITY = {
     "IN_AADHAAR": "critical", "CREDIT_CARD": "critical", "IN_BANK_ACCOUNT": "critical",
     "IN_PAN": "high", "IN_PASSPORT": "high", "IN_UPI": "high", "IN_IFSC": "medium",
     "MOBILE_IN": "medium", "EMAIL_ADDRESS": "medium", "IN_GSTIN": "medium",
-    "PERSON": "low", "ORG": "low", "DATE_TIME": "low", "FACE": "high",
+    "PERSON": "low", "ORG": "low", "DATE_TIME": "low", "FACE": "high", "GEO_COORDINATES": "high",
 }
 RECOMMEND = {
     "IN_AADHAAR": "Remove or replace; Aadhaar must not be shared outside authorised KYC flows (masked form keeps last 4 at most).",
@@ -62,6 +62,7 @@ RECOMMEND = {
     "IN_BANK_ACCOUNT": "Remove or tokenise the account number.",
     "IN_PAN": "Replace with a token unless the recipient needs it for tax purposes.",
     "FACE": "Remove the photo region (opaque fill) unless the person consented to sharing.",
+    "GEO_COORDINATES": "Remove or coarsen (2 decimals ≈ 1 km); precise coordinates reveal where someone lives or works.",
 }
 FILE_ACTIONS = {".pdf": ["remove"], ".png": ["remove"], ".jpg": ["remove"], ".jpeg": ["remove"]}  # opaque fill only
 ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
@@ -89,6 +90,7 @@ class Job:
     findings: list[dict] = field(default_factory=list)
     entities: dict[str, Entity] = field(default_factory=dict)  # finding id -> entity (never serialised)
     redaction: dict | None = None
+    agent_run: dict | None = None  # binding LLM swarm run: status, events, result
     discovery: dict | None = None
     error: str = ""
     cancel: threading.Event = field(default_factory=threading.Event)
@@ -102,6 +104,7 @@ class Job:
             "display_name": self.display_name, "input_type": self.suffix.lstrip(".") or "text",
             "stages": [asdict(s) for s in self.stages], "findings": self.findings,
             "redaction": self.redaction, "discovery": self.discovery, "error": self.error,
+            "agent_run": {k: v for k, v in self.agent_run.items() if k != "events"} | {"event_count": len(self.agent_run["events"])} if self.agent_run else None,
         }
 
 
@@ -132,6 +135,7 @@ def _advance(job: "Job", state: str, details: dict) -> None:
 JOBS: dict[str, Job] = {}
 LOCK = threading.Lock()
 POOL = ThreadPoolExecutor(max_workers=MAX_JOBS, thread_name_prefix="shield-job")
+SWARM_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="shield-swarm")
 LLM_CFG = llm.from_env()
 REFERENCES = pdq.HashBank()  # PDQ hashes of user-authorised reference images; pixels are never kept
 REF_LABELS: list[dict] = []
@@ -253,18 +257,34 @@ def _face_entities(src: Path) -> list[tuple[Entity, str]]:
 
 
 def _analyse(job: Job, src: Path) -> None:
-    from ..profile import layer_texts
+    from ..detect import audit_all_extracted_text
+    from ..detector import DetectorAgent
+    from ..extractor import ExtractorAgent
 
     _advance(job, "intake", {"format": job.suffix.lstrip(".") or "txt", "input_sha256": hashlib.sha256(src.read_bytes()).hexdigest()})
-    layers = _run_stage(job, "extract_layers", lambda: layer_texts(src))
-    entities = _run_stage(job, "detect", lambda: [e for n, t in layers.items() for e in detect(t, layer=n)])
-    kept, records = _run_stage(job, "review", lambda: review(entities, layers))
+    extraction = _run_stage(job, "extractor_agent", lambda: ExtractorAgent().execute(src))
+    job.stages[-1].detail = f"{extraction.status} · layers {','.join(extraction.layers)} · {extraction.execution_ms} ms · retries {extraction.retry_count}"
+    if extraction.status == "failed":
+        job.stages[-1].status = "failed"
+        raise RuntimeError("extraction failed")
+    layers = extraction.layers
+    detection = _run_stage(job, "detector_agent+personas", lambda: DetectorAgent().execute(extraction))
+    if detection.status == "failed" and detection.error != "No extractable text available.":
+        job.stages[-1].status, job.stages[-1].detail = "failed", "detection validation failed"
+        raise RuntimeError("detection failed")
+    entities, kept, records = detection.detected, detection.entities, detection.reviews
+    job.stages[-1].detail = f"{len(entities)} detected · {len(kept)} kept · {sum(r.verdict == 'dismissed' for r in records)} dismissed · {detection.severity_band}"
+    # audit against everything the personas looked at, so a deliberate dismissal is not re-raised as a miss
+    audit = _run_stage(job, "validator_audit", lambda: audit_all_extracted_text(layers, entities))
+    job.stages[-1].detail = f"{audit.verification_completeness_pct:.1f}% complete · {len(audit.potential_misses)} potential misses in {audit.total_tokens_scanned} tokens"
     job.raw = (entities, layers)
     rec_by_key = {}
     ri = iter(records)
     for e in entities:  # records align with non-FACE entities in order
         rec_by_key[(e.layer, e.start, e.type)] = next(ri)
     spans = {n: [(e.start, e.end) for e in entities if e.layer == n] for n in layers}
+    for m in audit.potential_misses:
+        spans.setdefault(m.layer, []).append((m.start, m.end))
 
     faces: list[tuple[Entity, str]] = []
     if FACE_REGIONS and src.suffix.lower() != ".txt":
@@ -292,6 +312,18 @@ def _analyse(job: Job, src: Path) -> None:
             "actions": actions,
         })
         ents[fid] = e
+    for m in audit.potential_misses:  # validator agent: tokens the detectors did not classify
+        fid = hashlib.sha256(salt + f"MISS|{m.layer}|{m.start}".encode()).hexdigest()[:12]
+        findings.append({
+            "id": fid, "type": "POTENTIAL_LEAK", "severity": {"CRITICAL": "high", "HIGH": "medium"}.get(m.band, "low"),
+            "confidence": round(min(m.severity_score / 100, 0.9), 2), "layer": m.layer,
+            "location": {"layer": m.layer, "start": m.start, "end": m.end},
+            "masked": m.masked_token, "evidence": _evidence(layers.get(m.layer, ""), m.start, m.end, spans.get(m.layer, []) + [(m.start, m.end)]),
+            "analyzer": f"validator_audit:{m.suspected_category}", "checks": [],
+            "recommendation": "Unclassified high-risk token; review and redact if it is an identifier or secret.",
+            "actions": FILE_ACTIONS.get(job.suffix, ["token", "mask", "remove"]) if m.layer in {"visible", "ocr"} else ["token", "mask", "remove"],
+        })
+        ents[fid] = Entity("POTENTIAL_LEAK", m.token, m.start, m.end, 0.6, m.layer)
     for e, where in faces:
         fid = hashlib.sha256(salt + e.layer.encode()).hexdigest()[:12]
         supported = e.layer.startswith("bbox:")
@@ -365,9 +397,14 @@ app.add_middleware(
 )
 
 
+MAX_REQUEST_BYTES = int(os.getenv("SHIELD_MAX_REQUEST_MB", "50")) * 1024 * 1024
+
+
 @app.middleware("http")
 async def guard(request: Request, call_next):
-    if request.url.path.startswith("/api/"):
+    if int(request.headers.get("content-length") or 0) > MAX_REQUEST_BYTES:
+        return JSONResponse({"detail": "request too large"}, status_code=413)
+    if request.url.path.startswith(("/api/", "/mcp")):
         if API_TOKEN and not secrets.compare_digest(request.headers.get("authorization", ""), f"Bearer {API_TOKEN}"):
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
         sweep()

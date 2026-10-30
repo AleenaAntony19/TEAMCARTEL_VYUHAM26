@@ -140,3 +140,38 @@ def test_openapi_lists_v1_contract(client):
     for p in ["/api/v1/shield/analyze", "/api/v1/shield/redact", "/api/v1/scout/search", "/api/v1/scout/crawl",
               "/api/v1/swarm/deliberate", "/api/v1/dossier/export"]:
         assert p in paths
+
+
+def test_swarm_run_binding_events_and_download(client, monkeypatch):
+    from shield import llm
+    from test_mcp_swarm import scripted
+
+    mock = scripted(lambda fs: [{"finding_id": f["id"], "action": "keep" if f["type"] == "PERSON" else "token", "reason": "x"} for f in fs])
+    real = httpx.Client
+    monkeypatch.setattr(llm.httpx, "Client", lambda **kw: real(**{**kw, "transport": mock}))
+    assert client.post("/api/v1/swarm/run", json={"job_id": "nope"}).status_code == 404
+    jid = client.post("/api/v1/shield/analyze", data={"text": f"Employee Name: Ravi Kumar\nAadhaar {AADHAAR}\nPAN ABCPK1234F"}).json()["job_id"]
+    wait(client, jid)
+    assert client.post("/api/v1/swarm/run", json={"job_id": jid}).status_code == 409  # no provider yet
+    client.put("/api/llm", json={"provider": "groq", "api_key": "test-key"})
+    assert client.post("/api/v1/swarm/run", json={"job_id": jid}).status_code == 202
+    with client.stream("GET", f"/api/v1/swarm/events?job_id={jid}") as r:
+        body = "".join(r.iter_text())
+    assert "event: end" in body and '"status": "done"' in body
+    assert AADHAAR not in body and "ABCPK1234F" not in body
+    events = [json.loads(line[5:]) for line in body.splitlines() if line.startswith("data:")]
+    assert any(e.get("event") == "spawn" for e in events) and any(e.get("action") == "adversarial_penetration_test" for e in events)
+    job = client.get(f"/api/v1/shield/jobs/{jid}").json()
+    assert job["agent_run"]["status"] == "done" and job["redaction"]["status"] == "CLEAN" and job["state"] == "consensus_ledger"
+    out = client.get(f"/api/jobs/{jid}/download").text
+    assert "Ravi Kumar" in out and "ABCPK1234F" not in out  # binding keep honoured; floor enforced
+    actions = [b["actor"] for b in server.JOBS[jid].ledger.blocks]
+    assert "agent_tool:execute_destructive_redaction" in actions and server.JOBS[jid].ledger.verify() is None
+
+
+def test_mcp_streamable_http_lists_tools(client):
+    r = client.post("/mcp/", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                    headers={"Accept": "application/json, text/event-stream", "Host": "127.0.0.1:8000"})
+    assert r.status_code == 200, r.text
+    names = {t["name"] for t in r.json()["result"]["tools"]}
+    assert {"validate_checksum", "execute_destructive_redaction", "run_agent_swarm"} <= names

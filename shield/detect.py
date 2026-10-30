@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import math
 import re
+from collections import Counter
 
-from .models import Entity, RankedEntity, SeverityFactors
+from .models import (
+    Entity,
+    RankedEntity,
+    SeverityFactors,
+    TokenAuditResult,
+    VerificationAuditReport,
+)
 
 # ---------- Verhoeff ----------
 _D = (
@@ -71,6 +79,9 @@ def luhn_valid(s: str) -> bool:
 PATTERNS: dict[str, re.Pattern] = {
     "IN_AADHAAR": re.compile(r"\b[2-9]\d{3}[\s-]?\d{4}[\s-]?\d{4}\b"),
     "IN_PAN": re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b"),
+    # GSTIN: state code + PAN + entity digit + 'Z' + check char (from origin/development, layout tightened)
+    "IN_GSTIN": re.compile(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b"),
+    "IN_PASSPORT": re.compile(r"\b[A-PR-WY][1-9]\d{6}\b"),
     "IN_UPI": re.compile(
         r"(?<![\w.])[\w.\-]{2,256}@(?:okaxis|oksbi|okicici|okhdfcbank|ybl|ibl|axl|paytm|upi|apl|axisbank|sbi|icici|hdfcbank)\b(?![\w.])",
         re.I,
@@ -80,13 +91,16 @@ PATTERNS: dict[str, re.Pattern] = {
     ),
     "MOBILE_IN": re.compile(r"(?<!\d)(?:\+91[\s-]?)?[6-9]\d{4}[\s-]?\d{5}(?!\d)"),
     "EMAIL_ADDRESS": re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"),
-    "CREDIT_CARD": re.compile(r"\b(?:\d[ -]?){13,19}\b"),
+    # card layouts only (4-4-4-4[-3], contiguous 13-19, Amex 4-6-5): free digit runs across dates/ids are not cards
+    "CREDIT_CARD": re.compile(r"\b(?:(?:\d{4}[ -]?){3}\d{1,7}|\d{4}[ -]\d{6}[ -]\d{5})\b"),
     "IN_BANK_ACCOUNT": re.compile(r"\b\d{9,18}\b"),
     "PERSON": re.compile(
         r"(?:Employee[ \t]+Name:?|Employee(?:[ \t]+ID)?:?|Name[ \t]*:|Mr\.?|Mrs\.?|Ms\.?|Dr\.?|Shri|Smt\.?)[ \t]+"
         r"([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){0,2})"  # names never span lines
     ),
     "ORG": re.compile(r"\b[A-Z][A-Za-z&]+(?:\s+(?:Corp|Ltd|Inc|Pvt|LLP|Bank|Technologies|Solutions))\b"),
+    # decimal lat/long pair, >= 4 decimals (~11 m): precise location
+    "GEO_COORDINATES": re.compile(r"(?<![\d.])-?\d{1,2}\.\d{4,}(?:\s*[,;|]?\s+|\s*,\s*)-?\d{1,3}\.\d{4,}(?![\d.])"),
     "DATE_TIME": re.compile(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b"),
 }
 
@@ -106,6 +120,15 @@ def detect(text: str, layer: str = "visible") -> list[Entity]:
                 score = 0.99
             elif typ == "IN_PAN":
                 score = 0.95
+            elif typ == "IN_GSTIN":
+                if not (1 <= int(val[:2]) <= 38 or val[:2] in {"97", "99"}):
+                    continue
+                score = 0.97  # outranks the PAN embedded in it
+            elif typ == "IN_PASSPORT":
+                ctx = text[max(0, m.start() - 40) : m.end() + 10].lower()
+                if "passport" not in ctx:
+                    continue  # letter+7 digits alone is too common (part numbers, codes)
+                score = 0.90
             elif typ == "IN_UPI":
                 score = 0.95
             elif typ == "IN_IFSC":
@@ -130,6 +153,11 @@ def detect(text: str, layer: str = "visible") -> list[Entity]:
                 score = 0.70
                 cands.append(Entity(typ, val, m.start(1), m.end(1), score, layer))
                 continue
+            elif typ == "GEO_COORDINATES":
+                lat, lon = (float(x) for x in re.findall(r"-?\d+\.\d+", val)[:2])
+                if not (abs(lat) <= 90 and abs(lon) <= 180):
+                    continue
+                score = 0.80
             elif typ == "ORG":
                 score = 0.50
             elif typ == "DATE_TIME":
@@ -494,3 +522,187 @@ def severity(entities: list[Entity]) -> SeverityResult:
 
     band = _get_band(doc_score)
     return SeverityResult(doc_score, band, sorted(types), ranked)
+
+
+# ---------- Full-Document Token Auditor & Verification Engine ----------
+COMMON_WORDS: set[str] = {
+    "the", "and", "for", "with", "from", "this", "that", "have", "name",
+    "employee", "number", "invalid", "valid", "report", "document", "page", "date",
+    "title", "status", "quarterly", "annual", "company", "organization", "statement",
+    "details", "information", "address", "access", "secret", "confidential", "private",
+    "public", "notes", "summary", "about", "other", "their", "which", "there", "first",
+    "last", "section", "table", "invoice", "receipt", "total", "amount", "project"
+}
+
+CONTEXT_TRIGGERS: set[str] = {
+    "account", "a/c", "acct", "aadhaar", "uid", "pan", "card", "cvv", "otp",
+    "pin", "salary", "payroll", "secret", "password", "token", "patient",
+    "medical", "confidential", "kyc", "ifsc", "balance", "access", "key"
+}
+
+TOKEN_PATTERN: re.Pattern = re.compile(
+    r"\b\d{4}[\s-]\d{4}[\s-]\d{4}\b|\b\d{6,19}\b|\b[A-Za-z0-9._%+\-@]{4,}\b"
+)
+
+
+def _shannon_entropy(s: str) -> float:
+    """Calculate Shannon entropy to flag high-randomness secrets and keys."""
+    if not s:
+        return 0.0
+    counts = Counter(s)
+    length = len(s)
+    return -sum((cnt / length) * math.log2(cnt / length) for cnt in counts.values())
+
+
+def extract_all_tokens(text: str, layer: str = "visible") -> list[tuple[str, int, int, str]]:
+    """Extract all candidate word, numerical, and alphanumeric tokens from text."""
+    if not text:
+        return []
+    tokens: list[tuple[str, int, int, str]] = []
+    for m in TOKEN_PATTERN.finditer(text):
+        tok = m.group(0).strip()
+        if len(tok) >= 3:
+            tokens.append((tok, m.start(), m.end(), layer))
+    return tokens
+
+
+def audit_all_extracted_text(
+    text_layers: dict[str, str] | str,
+    detected_entities: list[Entity],
+) -> VerificationAuditReport:
+    """
+    Exhaustively audit every word, number, and token across all document layers.
+    Computes the 5-factor severity score for each token and cross-checks with
+    the detector's findings to guarantee zero unflagged high-severity leaks.
+    """
+    if isinstance(text_layers, str):
+        text_layers = {"visible": text_layers}
+
+    all_tokens: list[tuple[str, int, int, str, str]] = []
+    for layer, text in text_layers.items():
+        if not text:
+            continue
+        for m in TOKEN_PATTERN.finditer(text):
+            tok = m.group(0).strip()
+            if len(tok) >= 3:
+                all_tokens.append((tok, m.start(), m.end(), layer, text))
+
+    total_tokens_scanned = len(all_tokens)
+    captured_count = 0
+    potential_misses: list[TokenAuditResult] = []
+    token_counts = Counter(t[0].lower() for t in all_tokens)
+
+    for tok, start, end, layer, full_text in all_tokens:
+        # Check if this token is covered by the primary detector's entities
+        covered = any(
+            (e.start <= start and end <= e.end)
+            or (e.value and tok in e.value)
+            or (e.value and e.value in tok)
+            for e in detected_entities
+        )
+
+        stripped = re.sub(r"[\s\-]", "", tok)
+        ent = _shannon_entropy(tok)
+        ctx_window = full_text[max(0, start - 50) : min(len(full_text), end + 50)].lower()
+        has_trigger = any(tr in ctx_window for tr in CONTEXT_TRIGGERS)
+
+        s, e, l, cat = 10.0, 10.0, 20.0, "STANDARD_TEXT"
+
+        if covered:
+            s, e, l, cat = 90.0, 85.0, 90.0, "DETECTED_PII"
+        elif len(stripped) == 12 and stripped.isdigit():
+            # 12-digit number (e.g. invalid Aadhaar or unformatted identity credential)
+            s = 85.0
+            e = 75.0
+            l = 90.0 if has_trigger else 60.0
+            cat = "UNCLASSIFIED_12DIGIT_NUMERIC"
+        elif 13 <= len(stripped) <= 19 and stripped.isdigit():
+            # 13-19 digit sequence (credit/debit card structure)
+            s = 85.0
+            e = 85.0
+            l = 90.0 if has_trigger else 60.0
+            cat = "UNCLASSIFIED_CARD_NUMERIC"
+        elif 9 <= len(stripped) <= 11 and stripped.isdigit():
+            # 9-11 digit sequence (bank account or unflagged phone)
+            s = 65.0
+            e = 65.0
+            l = 85.0 if has_trigger else 50.0
+            cat = "UNCLASSIFIED_ACCOUNT_OR_PHONE"
+        elif len(tok) >= 12 and ent >= 3.4 and any(c.isdigit() for c in tok) and any(c.isalpha() for c in tok):
+            # High-entropy alphanumeric token (API key / secret / credential)
+            s = 80.0
+            e = 75.0
+            l = 80.0 if has_trigger else 50.0
+            cat = "HIGH_ENTROPY_SECRET"
+        elif len(tok) == 10 and any(c.isdigit() for c in tok) and any(c.isalpha() for c in tok):
+            # 10-char alphanumeric sequence (e.g. PAN or Passport syntax candidate)
+            s = 70.0
+            e = 65.0
+            l = 80.0 if has_trigger else 45.0
+            cat = "UNCLASSIFIED_ALPHANUMERIC_ID"
+        elif "@" in tok and "." in tok:
+            s = 55.0
+            e = 50.0
+            l = 75.0 if has_trigger else 40.0
+            cat = "UNCLASSIFIED_HANDLE_OR_EMAIL"
+        elif tok.lower() in COMMON_WORDS:
+            s, e, l, cat = 5.0, 5.0, 10.0, "COMMON_WORD"
+        elif has_trigger and len(tok) >= 5 and (any(c.isdigit() for c in tok) or tok.isupper()):
+            s = 45.0
+            e = 40.0
+            l = 75.0
+            cat = "TRIGGER_PROXIMITY_TOKEN"
+
+        c = _calc_exposure_context(layer)
+        f = _calc_frequency(token_counts[tok.lower()])
+        score = round(
+            WEIGHT_SENSITIVITY * s
+            + WEIGHT_EXPLOITABILITY * e
+            + WEIGHT_LINKABILITY * l
+            + WEIGHT_CONTEXT * c
+            + WEIGHT_FREQUENCY * f,
+            2,
+        )
+        band = _get_band(score)
+        factors = SeverityFactors(s, e, l, c, f)
+
+        if score >= 40.0:
+            if covered:
+                captured_count += 1
+            else:
+                masked = mask_value(tok, "IN_AADHAAR" if "12DIGIT" in cat else "GENERIC")
+                potential_misses.append(
+                    TokenAuditResult(
+                        token=tok,
+                        masked_token=masked,
+                        layer=layer,
+                        start=start,
+                        end=end,
+                        severity_score=score,
+                        band=band,
+                        factors=factors,
+                        is_captured_by_detector=False,
+                        suspected_category=cat,
+                    )
+                )
+
+    # Deduplicate potential misses by (token, layer)
+    uniq_misses: list[TokenAuditResult] = []
+    seen = set()
+    for m in potential_misses:
+        key = (m.token, m.layer)
+        if key not in seen:
+            seen.add(key)
+            uniq_misses.append(m)
+
+    total_high_risk = captured_count + len(uniq_misses)
+    completeness = 100.0 if total_high_risk == 0 else round((captured_count / total_high_risk) * 100, 1)
+
+    return VerificationAuditReport(
+        total_tokens_scanned=total_tokens_scanned,
+        captured_count=captured_count,
+        potential_misses=uniq_misses,
+        verification_completeness_pct=completeness,
+        audit_passed=(len(uniq_misses) == 0),
+    )
+

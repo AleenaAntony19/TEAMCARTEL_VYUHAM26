@@ -30,7 +30,7 @@ def redact(src: str | Path, entities, out_dir: str | Path, aggressive: bool = Fa
         return redact_xlsx(src, entities, dst, aggressive)
     if suffix in {".jpg", ".jpeg", ".png"}:
         return redact_image(src, entities, dst, aggressive)
-    if suffix == ".txt":
+    if suffix in {".txt", ".csv", ".json"}:
         dst.write_text(redact_text(src.read_text(encoding="utf-8"), entities), encoding="utf-8")
         return dst
     raise ValueError(f"Unsupported format: {src.suffix}")

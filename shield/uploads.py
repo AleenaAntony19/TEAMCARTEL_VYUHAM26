@@ -17,7 +17,7 @@ ZIP_MAX_MEMBERS = 2000
 ZIP_MAX_TOTAL = 150 * 1024 * 1024
 ZIP_MAX_RATIO = 100
 
-SUFFIXES = {".pdf", ".docx", ".xlsx", ".png", ".jpg", ".jpeg", ".txt"}
+SUFFIXES = {".pdf", ".docx", ".xlsx", ".png", ".jpg", ".jpeg", ".txt", ".csv", ".json"}
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS  # PIL raises DecompressionBombError above this
 
 
@@ -92,4 +92,11 @@ def validate(filename: str, data: bytes) -> str:
             raise UploadError("text must be UTF-8") from None
         if len(text) > MAX_TEXT_CHARS:
             raise UploadError(f"text longer than {MAX_TEXT_CHARS} characters")
+        if suffix == ".json":
+            import json
+
+            try:
+                json.loads(text)
+            except ValueError:
+                raise UploadError("invalid JSON") from None
     return suffix

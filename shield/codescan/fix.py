@@ -70,17 +70,18 @@ def _line_edit(rel: str, lineno: int, old: str, new: str) -> TextEdit:
     return TextEdit(rel, lineno, 0, lineno, len(old), new)
 
 
+FAKE_VALUES = {
+    "IN_AADHAAR": f"9999 9999 999{verhoeff_check_digit('99999999999')}",  # format-valid, reserved-looking test number
+    "IN_PAN": "AAAPZ1234A",
+    "MOBILE_IN": "+91 90000 00000",
+    "EMAIL_ADDRESS": "user1@example.com",
+    "IN_UPI": "test@upi",
+    "IN_IFSC": "SBIN0000000",
+}
+
+
 def _fake(rule: str) -> str:
-    if rule == "IN_AADHAAR":
-        base = "99999999999"
-        return f"9999 9999 999{verhoeff_check_digit(base)}"
-    return {
-        "IN_PAN": "AAAPZ1234A",
-        "MOBILE_IN": "+91 90000 00000",
-        "EMAIL_ADDRESS": "user1@example.com",
-        "IN_UPI": "test@upi",
-        "IN_IFSC": "SBIN0000000",
-    }.get(rule, f"[FAKE-{rule}]")
+    return FAKE_VALUES.get(rule, f"[FAKE-{rule}]")
 
 
 def plan_fix(root: Path, finding: dict, kind: str) -> FixPlan:

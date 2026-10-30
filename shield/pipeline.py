@@ -8,10 +8,9 @@ from typing import AsyncIterator, Iterator
 
 from . import face, pdq
 from .crawl import Job, Scheduler
-from dataclasses import asdict
 
 from .review import review
-from .detect import severity
+from .detect import audit_all_extracted_text, severity
 from .ledger import Ledger, sha256_file
 from .matcher import Matcher
 from .models import Entity
@@ -41,8 +40,11 @@ def run_document(src: str | Path, work: str | Path, ledger: Ledger) -> Iterator[
 
     agents = AgentFactory.spawn(prof, src)
     ledger.append("AGENTS_SPAWNED", {"agents": [a.name for a in agents]})
-    for a in agents:
-        yield {"kind": "agent", "agent": a.name, "status": "ready"}
+    for a in agents:  # each specialist does its own extraction/detection pass
+        try:
+            yield {"kind": "agent", "agent": a.name, "status": "done", "result": a.run()}
+        except Exception as exc:
+            yield {"kind": "agent", "agent": a.name, "status": "failed", "error": type(exc).__name__}
 
     entities = list(prof.entities)
 
@@ -80,6 +82,28 @@ def run_document(src: str | Path, work: str | Path, ledger: Ledger) -> Iterator[
         "ranked_entities": ranked_entities,
     }
 
+    # Full-Document Word Verification & Audit Pass
+    audit_rep = audit_all_extracted_text(prof.layers or {"visible": prof.text}, entities)
+    ledger.append(
+        "VERIFICATION_AUDIT",
+        {
+            "scanned": audit_rep.total_tokens_scanned,
+            "captured": audit_rep.captured_count,
+            "misses": len(audit_rep.potential_misses),
+            "completeness_pct": audit_rep.verification_completeness_pct,
+            "passed": audit_rep.audit_passed,
+        },
+    )
+    yield {
+        "kind": "verification_audit",
+        "report": asdict(audit_rep),
+    }
+
+    # Self-healing: auto-merge high-risk misses into redaction entities
+    for miss in audit_rep.potential_misses:
+        if miss.severity_score >= 60.0:
+            entities.append(Entity("POTENTIAL_LEAK", miss.token, miss.start, miss.end, 0.90, miss.layer))
+
     out = redact(src, entities, work, aggressive=False)
     yield {"kind": "redact", "output": str(out), "sha256": sha256_file(out)}
 
@@ -111,6 +135,7 @@ def run_document(src: str | Path, work: str | Path, ledger: Ledger) -> Iterator[
         "types": types,
         "ranked_entities": ranked_entities,
         "review": [asdict(r) for r in review_records],
+        "verification_audit": asdict(audit_rep),
         "attacks": [{"name": a.name, "passed": a.passed, "evidence": a.evidence} for a in attacks],
         "status": status,
         "face_vectors_count": sum(1 for e in entities if e.type == "FACE"),
@@ -132,8 +157,8 @@ async def run_scout(
     ledger.append("SESSION_START", {"org": org, "domain": domain})
     registry = load_registry(registry_path)
     agents = AgentFactory.spawn_scout(registry, bool(enrolled))
-    ledger.append("AGENTS_SPAWNED", {"agents": [a.name for a in agents], "scout": True})
-    yield {"kind": "agents", "agents": [a.name for a in agents]}
+    ledger.append("AGENTS_SPAWNED", {"agents": agents, "scout": True})
+    yield {"kind": "agents", "agents": agents}
 
     queries = build_queries(org, types, domain)
     text_hits: list[dict] = []

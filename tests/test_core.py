@@ -91,3 +91,29 @@ def test_ledger_allows_hashes_but_not_pii():
     with pytest.raises(ValueError):
         led.append("t", "BAD", {"note": "call +91 98765 43210"})
     assert led.verify() is None
+
+
+def test_geo_coordinates_pair():
+    from shield.detect import detect
+
+    assert [e.value for e in detect("40419  2026-10-28 12:28:30  8.616759    76.852176  [null]") if e.type == "GEO_COORDINATES"] == ["8.616759    76.852176"]
+    assert not [e for e in detect("lat 95.123456, 76.852176") if e.type == "GEO_COORDINATES"]  # out of range
+    assert not [e for e in detect("version 1.2 3.4") if e.type == "GEO_COORDINATES"]  # too coarse
+
+
+def test_card_pattern_ignores_digit_runs_across_dates():
+    from shield.detect import detect
+
+    assert not [e for e in detect("40418 2026-10-28 12:28:29.030931") if e.type == "CREDIT_CARD"]
+    assert [e.type for e in detect("Card 4111 1111 1111 1111")] == ["CREDIT_CARD"]
+    assert [e.type for e in detect("Card 4111111111111111")] == ["CREDIT_CARD"]
+
+
+def test_spawned_specialists_do_real_work(fx):
+    from shield.profile import AgentFactory, profile
+
+    agents = AgentFactory.spawn(profile(fx["pdf"]), fx["pdf"])
+    results = {a.name: a.run() for a in agents}
+    assert results["PdfStreamInspector"]["detections"]["IN_AADHAAR"] == 1
+    assert results["IndiaKycSpecialist"]["detections"].get("IN_PAN")
+    assert "face_regions" in results["VisualLikenessAgent"] or "error" in results["VisualLikenessAgent"]

@@ -140,4 +140,125 @@ def dossier(job_id: str):
     return FileResponse(path, filename=f"shield_dossier_{j.id[:8]}.zip", content_disposition_type="attachment")
 
 
+class SwarmRunBody(BaseModel):
+    job_id: str
+
+
+def _swarm_job(j: "server.Job") -> None:
+    """Binding agent swarm on an analysed job: MCP tools act on the job's own findings, graph and ledger."""
+    import time as _t
+
+    from .. import llm
+    from ..mcp.tools import SESSIONS, register_session
+    from ..swarm import run_agentic
+
+    run = j.agent_run
+    src = j.workdir / f"input{j.suffix}"
+
+    def on_tool(tool: str, args: dict, result: dict) -> None:
+        safe = {k: v for k, v in args.items() if k in {"finding_id", "strategy", "page", "decisions", "fix", "k"}}
+        try:
+            j.ledger.append(f"agent_tool:{tool}", "TOOL_CALL", {"args": safe, "ok": "error" not in result})
+        except ValueError:
+            j.ledger.append(f"agent_tool:{tool}", "TOOL_CALL", {"ok": "error" not in result})
+
+    def on_event(ev: dict) -> None:
+        # observations are already masked by the tools; trimmed so the event log stays small
+        run["events"].append({k: (json.dumps(v, default=str)[:1500] if k == "observation" else v) for k, v in ev.items()})
+
+    sess = register_session(src, j.raw[1] if j.raw else {}, dict(j.entities), j.workdir / "agentic",
+                            on_tool=on_tool, on_stage=lambda st, d: server._advance(j, st, d))
+    t = _t.monotonic()
+    try:
+        res = asyncio.run(run_agentic(sess.id, server.LLM_CFG, on_event))
+        out = sess.output
+        if out and out.exists():
+            final = j.workdir / "out" / f"input_sanitized{j.suffix}"
+            final.parent.mkdir(exist_ok=True)
+            shutil.copyfile(out, final)
+            j.redaction = {
+                "status": "CLEAN" if res["clean"] else "FAILED",
+                "checks": [{"name": a["name"], "passed": a["passed"], "evidence": a["evidence"]} for a in res["attacks"]],
+                "retried_aggressive": res["cycles"] > 1, "selected": sum(d["action"] != "keep" for d in res["decisions"]),
+                "output_name": f"sanitized{j.suffix}", "sha256": hashlib.sha256(final.read_bytes()).hexdigest(),
+                "preview_text": "", "has_preview_image": j.suffix in {".pdf", ".png", ".jpg", ".jpeg"},
+                "ms": int((_t.monotonic() - t) * 1000), "note": "Produced by the binding agent swarm.",
+            }
+            try:
+                from .. import verify
+
+                j.redaction["preview_text"] = verify._extract_text(final)[:20000]
+            except Exception:
+                j.redaction["preview_text"] = "(preview unavailable)"
+            server._advance(j, "consensus_ledger", {"status": j.redaction["status"], "output_sha256": j.redaction["sha256"], "by": "agent_swarm"})
+            j.redaction["ledger_head"], j.redaction["ledger_valid"] = j.ledger.blocks[-1]["current_hash"], j.ledger.verify() is None
+        run.update(status="done", result={k: v for k, v in res.items() if k != "output"})
+    except Exception as exc:
+        run.update(status="failed", error=type(exc).__name__ + (f": {exc}" if isinstance(exc, (llm.LLMError, HTTPException)) else ""))
+    finally:
+        SESSIONS.pop(sess.id, None)
+
+
+@router.post("/swarm/run", status_code=202, tags=["swarm"])
+def swarm_run(body: SwarmRunBody):
+    """Run the binding LLM agent swarm (planner, specialists, personas, FormatGuard, adjudicator, red team) on an analysed job."""
+    j = server._get(body.job_id)
+    if j.kind != "analysis" or j.status != "ready":
+        raise HTTPException(409, "analysis must finish first")
+    if server.LOCAL_ONLY or server.LLM_CFG.provider == "none" or not server.LLM_CFG.api_key:
+        raise HTTPException(409, "configure Groq or Claude in the AI provider tab first")
+    if j.agent_run and j.agent_run["status"] == "running":
+        raise HTTPException(409, "a swarm run is already in progress")
+    j.agent_run = {"status": "running", "events": [], "result": None, "error": ""}
+    server.SWARM_POOL.submit(_swarm_job, j)
+    return {"job_id": j.id, "status": "running"}
+
+
+@router.get("/swarm/events", tags=["swarm"])
+async def swarm_events(job_id: str, since: int = 0):
+    """SSE: live agent steps (tool calls with masked observations, spawns, verdicts) until the run ends."""
+    j = server._get(job_id)
+    if not j.agent_run:
+        raise HTTPException(409, "no swarm run for this job")
+
+    async def gen():
+        i = since
+        while True:
+            evs = j.agent_run["events"]
+            while i < len(evs):
+                yield {"event": "agent", "data": json.dumps(evs[i], default=str)}
+                i += 1
+            if j.agent_run["status"] != "running":
+                yield {"event": "end", "data": json.dumps({"status": j.agent_run["status"], "result": j.agent_run.get("result"), "error": j.agent_run.get("error")})}
+                return
+            await asyncio.sleep(0.3)
+
+    return EventSourceResponse(gen())
+
+
 app.include_router(router)
+
+# MCP over Streamable HTTP at /mcp (same tools as `python -m shield.mcp` stdio); guarded by SHIELD_API_TOKEN like /api
+from contextlib import asynccontextmanager  # noqa: E402
+
+from ..mcp.tools import server as mcp_server  # noqa: E402
+
+def _mcp_app():
+    return mcp_server.streamable_http_app(streamable_http_path="/", stateless_http=True, json_response=True)
+
+
+app.mount("/mcp", _mcp_app())
+_mcp_route = app.router.routes[-1]
+_inner_lifespan = app.router.lifespan_context
+
+
+@asynccontextmanager
+async def _lifespan(a):
+    # a session manager runs once per instance: build a fresh MCP app for every startup (tests restart the app)
+    _mcp_route.app = _mcp_app()
+    async with mcp_server.session_manager.run():
+        async with _inner_lifespan(a) as state:
+            yield state
+
+
+app.router.lifespan_context = _lifespan

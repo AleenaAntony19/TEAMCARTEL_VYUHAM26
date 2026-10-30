@@ -6,6 +6,8 @@ Keys come from env (GROQ_API_KEY / ANTHROPIC_API_KEY) or are set at runtime in m
 from __future__ import annotations
 
 import json
+import re
+import threading
 import os
 import sys
 import time
@@ -16,7 +18,7 @@ import httpx
 PROVIDERS = {
     "groq": {
         "endpoint": "https://api.groq.com/openai/v1/chat/completions",
-        "model": "llama-3.3-70b-versatile",
+        "model": "openai/gpt-oss-20b",
         "key_env": "GROQ_API_KEY",
     },
     "anthropic": {
@@ -99,20 +101,22 @@ def configure(cfg: LLMConfig, **changes) -> LLMConfig:
     )
 
 
-def _request(cfg: LLMConfig, system: str, user: str) -> tuple[dict, dict]:
+def _request(cfg: LLMConfig, system: str, user: str, max_tokens: int, json_mode: bool) -> tuple[dict, dict]:
     if cfg.provider == "groq":
-        return (
-            {"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"},
-            {
-                "model": cfg.model,
-                "max_tokens": 300,
-                "temperature": 0.2,
-                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            },
-        )
+        body = {
+            "model": cfg.model,
+            "max_tokens": max_tokens,
+            "temperature": 0.2,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        }
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
+        if cfg.model.startswith("openai/gpt-oss"):
+            body["reasoning_effort"] = "low"  # reasoning tokens count against max_tokens; keep them short
+        return ({"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"}, body)
     return (
         {"x-api-key": cfg.api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-        {"model": cfg.model, "max_tokens": 300, "system": system, "messages": [{"role": "user", "content": user}]},
+        {"model": cfg.model, "max_tokens": max_tokens, "system": system, "messages": [{"role": "user", "content": user}]},
     )
 
 
@@ -122,31 +126,140 @@ def _text(cfg: LLMConfig, data: dict) -> str:
     return "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text").strip()
 
 
-def complete(cfg: LLMConfig, system: str, user: str, transport: httpx.BaseTransport | None = None) -> str:
+_PACE = {"lock": threading.Lock(), "not_before": 0.0}
+MAX_WAIT = float(os.getenv("SHIELD_LLM_MAX_WAIT", "20"))
+
+
+def _seconds(v: str | None) -> float:
+    """Parse rate-limit reset values like '7.66s', '1m2.5s', '450ms'."""
+    if not v:
+        return 0.0
+    total = 0.0
+    for num, unit in re.findall(r"([\d.]+)(ms|h|m|s)", v):
+        total += float(num) * {"ms": 0.001, "s": 1, "m": 60, "h": 3600}[unit]
+    return total
+
+
+def _pace(resp: httpx.Response) -> None:
+    """Shared token-bucket pacing from provider headers so parallel agents back off before hitting 429."""
+    remaining = resp.headers.get("x-ratelimit-remaining-tokens") or resp.headers.get("anthropic-ratelimit-tokens-remaining")
+    if remaining is not None and remaining.isdigit() and int(remaining) < 2500:
+        reset = _seconds(resp.headers.get("x-ratelimit-reset-tokens")) or 5.0
+        with _PACE["lock"]:
+            _PACE["not_before"] = max(_PACE["not_before"], time.monotonic() + min(MAX_WAIT, reset))
+
+
+def _post(cfg: LLMConfig, headers: dict, body: dict, transport: httpx.BaseTransport | None) -> dict:
+    """POST with bounded retries; honours retry-after. Errors never include headers (they hold the key)."""
     if cfg.provider == "none":
         raise LLMError("no LLM provider configured")
     if not cfg.api_key:
         raise LLMError(f"no API key set for {cfg.provider}")
-    headers, body = _request(cfg, system, user)
     last = "unknown error"
     with httpx.Client(timeout=cfg.timeout, transport=transport) as client:
         for attempt in range(cfg.retries + 1):
+            wait = _PACE["not_before"] - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
             try:
                 resp = client.post(cfg.endpoint, headers=headers, json=body)
             except httpx.HTTPError as exc:
-                last = type(exc).__name__  # never include request details: headers hold the key
+                last = type(exc).__name__
             else:
+                _pace(resp)
                 if resp.status_code == 200:
                     try:
-                        return _text(cfg, resp.json())
-                    except (KeyError, IndexError, ValueError):
+                        return resp.json()
+                    except ValueError:
                         raise LLMError("unexpected response shape") from None
                 last = f"HTTP {resp.status_code}"
                 if resp.status_code not in {408, 429, 500, 502, 503, 504, 529}:
                     break
+                if attempt < cfg.retries and resp.headers.get("retry-after"):
+                    try:  # provider rate limit: wait what it asks, bounded so a request never hangs
+                        time.sleep(min(MAX_WAIT, float(resp.headers["retry-after"])))
+                        continue
+                    except ValueError:
+                        pass
             if attempt < cfg.retries:
                 time.sleep(min(4.0, 0.5 * 2**attempt))
     raise LLMError(f"{cfg.provider} request failed: {last}")
+
+
+def complete(
+    cfg: LLMConfig, system: str, user: str, transport: httpx.BaseTransport | None = None,
+    max_tokens: int = 600, json_mode: bool = False,
+) -> str:
+    headers, body = _request(cfg, system, user, max_tokens, json_mode)
+    try:
+        return _text(cfg, _post(cfg, headers, body, transport))
+    except (KeyError, IndexError, TypeError):
+        raise LLMError("unexpected response shape") from None
+
+
+def chat_tools(
+    cfg: LLMConfig, system: str, history: list[dict], tools: list[dict],
+    transport: httpx.BaseTransport | None = None, max_tokens: int = 1200,
+) -> dict:
+    """One native tool-calling turn.
+
+    history items: {"role": "user", "content": str}
+                   {"role": "assistant", "text": str, "tool_calls": [{"id", "name", "args"}]}
+                   {"role": "tool", "id": str, "name": str, "content": str}
+    tools: [{"name", "description", "input_schema"}]  (MCP Tool shape)
+    returns {"text": str, "tool_calls": [{"id", "name", "args"}]}
+    """
+    if cfg.provider == "groq":
+        msgs: list[dict] = [{"role": "system", "content": system}]
+        for h in history:
+            if h["role"] == "user":
+                msgs.append({"role": "user", "content": h["content"]})
+            elif h["role"] == "assistant":
+                m = {"role": "assistant", "content": h.get("text") or ""}
+                if h.get("tool_calls"):
+                    m["tool_calls"] = [{"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": json.dumps(c["args"])}} for c in h["tool_calls"]]
+                msgs.append(m)
+            else:
+                msgs.append({"role": "tool", "tool_call_id": h["id"], "content": h["content"]})
+        body = {"model": cfg.model, "messages": msgs, "max_tokens": max_tokens, "temperature": 0.1,
+                "tools": [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}} for t in tools],
+                "tool_choice": "auto"}
+        if cfg.model.startswith("openai/gpt-oss"):
+            body["reasoning_effort"] = "low"
+        data = _post(cfg, {"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"}, body, transport)
+        try:
+            msg = data["choices"][0]["message"]
+            calls = [{"id": c["id"], "name": c["function"]["name"], "args": json.loads(c["function"].get("arguments") or "{}")} for c in msg.get("tool_calls") or []]
+        except (KeyError, IndexError, TypeError, ValueError):
+            raise LLMError("unexpected tool-call response shape") from None
+        u = data.get("usage") or {}
+        return {"text": msg.get("content") or "", "tool_calls": calls, "tokens": int(u.get("total_tokens") or 0)}
+
+    if cfg.provider == "anthropic":
+        msgs = []
+        for h in history:
+            if h["role"] == "user":
+                msgs.append({"role": "user", "content": h["content"]})
+            elif h["role"] == "assistant":
+                blocks = ([{"type": "text", "text": h["text"]}] if h.get("text") else []) + [
+                    {"type": "tool_use", "id": c["id"], "name": c["name"], "input": c["args"]} for c in h.get("tool_calls", [])]
+                msgs.append({"role": "assistant", "content": blocks})
+            else:
+                block = {"type": "tool_result", "tool_use_id": h["id"], "content": h["content"]}
+                if msgs and msgs[-1]["role"] == "user" and isinstance(msgs[-1]["content"], list):
+                    msgs[-1]["content"].append(block)  # consecutive results share one user turn
+                else:
+                    msgs.append({"role": "user", "content": [block]})
+        body = {"model": cfg.model, "max_tokens": max_tokens, "system": system, "messages": msgs,
+                "tools": [{"name": t["name"], "description": t["description"], "input_schema": t["input_schema"]} for t in tools]}
+        data = _post(cfg, {"x-api-key": cfg.api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}, body, transport)
+        blocks = data.get("content", [])
+        u = data.get("usage") or {}
+        return {"tokens": int(u.get("input_tokens", 0)) + int(u.get("output_tokens", 0)),
+                "text": "".join(b.get("text", "") for b in blocks if b.get("type") == "text"),
+                "tool_calls": [{"id": b["id"], "name": b["name"], "args": b.get("input") or {}} for b in blocks if b.get("type") == "tool_use"]}
+
+    raise LLMError("no LLM provider configured")
 
 
 def test_connection(cfg: LLMConfig, transport: httpx.BaseTransport | None = None) -> dict:

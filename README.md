@@ -58,6 +58,17 @@ Run every check: `bash scripts/validate.sh`.
 
 Queries are built from organisation/domain and entity *types* only (plus up to 4 LLM suggestions if a provider is set). Every query goes through the privacy firewall ([shield/textscout.py](shield/textscout.py) `firewall`), which blocks any detected personal value and, when linked to an analysis, that document's values. Search providers are pluggable: `brave`, `google_cse` (Google Programmable Search JSON API), `serper`, or `offline` (bundled fixtures, clearly labelled). Optional crawl: registry seeds only ([registry/seeds.yaml](registry/seeds.yaml)), robots.txt honoured, rate/page/depth limits, an SSRF guard that re-checks the *connected* IP (DNS-rebinding defence), and no redirects to private networks or non-http(s) schemes. Results show URL, title, masked excerpt, timestamp, match type, score and status (`candidate: needs human review` vs `confirmed: PDQ strong match`).
 
+## AI agent swarm + MCP
+
+`shield/mcp/` is a real MCP server (official `mcp` SDK). It runs over stdio (`python -m shield.mcp`) or Streamable HTTP (`/mcp` on the API), and its 14 tools run the engine for real. `shield/swarm.py` runs LLM ReAct agents with native tool calling (Groq `tools`/`tool_calls`, Claude `tool_use`):
+- the MetaPlanner spawns specialists;
+- PrivacyHawk, PragmaticDev and StatutoryAuditor debate in parallel;
+- FormatGuard or RefactorBot optimize the fix;
+- the SwarmAdjudicator's plan is **executed**;
+- a red team attacks, with up to 3 replan cycles.
+
+Start it with "Run AI agent swarm" in the web app, `POST /api/v1/swarm/run`, or the VS Code command. Safety floor, grounding and token numbers are in [agents.md](agents.md).
+
 ## AI providers (optional)
 
 Deterministic analysis never needs an LLM. A provider only adds plain-language explanations and extra discovery queries. Configure it in the web **AI provider** tab, the VS Code **AI Provider** panel, or env vars:
@@ -65,7 +76,7 @@ Deterministic analysis never needs an LLM. A provider only adds plain-language e
 | Variable | Meaning |
 |---|---|
 | `SHIELD_LLM_PROVIDER` | `none` (default), `groq` (development), `anthropic` (production) |
-| `SHIELD_LLM_MODEL` | default `llama-3.3-70b-versatile` (Groq) / `claude-haiku-5-5` (Anthropic) |
+| `SHIELD_LLM_MODEL` | default `openai/gpt-oss-20b` (Groq; `llama-3.3-70b-versatile` is no longer served for this key) / `claude-haiku-5-5` (Anthropic) |
 | `GROQ_API_KEY` / `ANTHROPIC_API_KEY` | keys; never logged, printed or returned by the API |
 | `SHIELD_LLM_ENDPOINT`, `SHIELD_LLM_TIMEOUT`, `SHIELD_LLM_RETRIES` | https endpoint override; 1–120 s; 0–5 retries |
 

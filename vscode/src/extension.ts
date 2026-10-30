@@ -6,6 +6,7 @@ import {
 } from "./core.ts";
 import { RunError, runPython } from "./runner.ts";
 import { AiViewProvider, llmEnv } from "./aiView.ts";
+import { toolJson, withMcp } from "./mcpClient.ts";
 
 const PREVIEW_SCHEME = "shield-preview";
 
@@ -239,6 +240,41 @@ export function activate(ctx: vscode.ExtensionContext) {
     vscode.commands.registerCommand("shieldCode.previewFix", (root: string, f: Finding, kind: string) => previewFix(root, f, kind, tree).catch(report)),
     vscode.commands.registerCommand("shieldCode.explainFinding", (f: Finding) => explain(f, ctx).catch(report)),
     vscode.commands.registerCommand("shieldCode.showOutput", () => output.show()),
+
+    vscode.commands.registerCommand("shieldCode.runSwarm", async () => {
+      const root = roots()[0];
+      if (!root) return;
+      const env = await llmEnv(ctx);
+      if (!env) {
+        const go = await vscode.window.showInformationMessage("Shield: connect Groq or Claude in the AI Provider panel first.", "Open panel");
+        if (go) await vscode.commands.executeCommand("shieldCode.ai.focus");
+        return;
+      }
+      const ok = await vscode.window.showWarningMessage(
+        "Run the AI agent swarm on this workspace?",
+        { modal: true, detail: "Agents (MetaPlanner, PrivacyHawk, PragmaticDev, StatutoryAuditor, RefactorBot, SwarmAdjudicator, red team) decide and APPLY code fixes via MCP tools: secrets move to .env, test PII becomes synthetic. Originals are backed up to .shield/backup/. Findings are sent masked to the AI provider." },
+        "Run swarm",
+      );
+      if (ok !== "Run swarm") return;
+      await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Shield: agent swarm (MCP)…", cancellable: false }, async (progress) => {
+        await withMcp(root, env, async (client) => {
+          progress.report({ message: "open_workspace" });
+          const opened = toolJson(await client.callTool({ name: "open_workspace", arguments: { path: root } }));
+          if (opened.error || !opened.session_id) throw new RunError(String(opened.error ?? "open_workspace failed"));
+          progress.report({ message: `run_agent_swarm on ${opened.count} findings` });
+          const res = toolJson(await client.callTool({ name: "run_agent_swarm", arguments: { session_id: opened.session_id } }, undefined, { timeout: 900_000 }));
+          if (res.error) throw new RunError(String(res.error));
+          output.appendLine(`\n[agent swarm] clean=${res.clean} cycles=${res.cycles} llm_calls=${res.llm_calls} tool_calls=${res.tool_calls} tokens=${res.tokens}`);
+          for (const a of (res.agents as { name: string; steps: number; tokens: number; tools: string[]; error: string }[]) ?? [])
+            output.appendLine(`  ${a.name}: ${a.steps} steps, ${a.tokens} tok, tools [${a.tools.join(", ")}] ${a.error}`);
+          for (const d of (res.decisions as { finding_id: string; action: string; reason: string }[]) ?? [])
+            output.appendLine(`  decision ${d.finding_id}: ${d.action} (${d.reason})`);
+          output.show(true);
+          void vscode.window.showInformationMessage(`Shield swarm: ${res.clean ? "clean" : "findings remain"} · ${res.tokens} tokens. Secrets moved to .env must still be rotated.`);
+        });
+        await scan(root, tree);
+      }).then(undefined, report);
+    }),
 
     vscode.commands.registerCommand("shieldCode.exportSarif", async () => {
       const root = roots()[0];

@@ -41,7 +41,7 @@ def test_text_flow_preview_redact_download(client):
     assert AADHAAR not in raw and "234567890124" not in raw and "ABCPK1234F" not in raw  # findings are masked
     aad = next(f for f in job["findings"] if f["type"] == "IN_AADHAAR")
     assert aad["severity"] == "critical" and aad["masked"].endswith("0124") and aad["checks"]
-    assert {s["name"] for s in job["stages"]} >= {"validate", "extract_layers", "detect", "review"}
+    assert {s["name"] for s in job["stages"]} >= {"validate", "extractor_agent", "detector_agent+personas", "validator_audit"}
 
     sel = [{"finding_id": f["id"], "action": "token"} for f in job["findings"]]
     dry = client.post(f"/api/jobs/{jid}/redact", json={"selections": sel, "dry_run": True}).json()
@@ -179,3 +179,10 @@ def test_person_does_not_span_lines():
 
     names = [e.value for e in detect("Employee Name: Ravi Kumar\nAadhaar 2345 6789 0124") if e.type == "PERSON"]
     assert names == ["Ravi Kumar"]
+
+
+def test_validator_audit_surfaces_undetected_12_digit_masked(client):
+    job = wait(client, client.post("/api/jobs", data={"text": "Invoice ref 987654321098 for order 55"}).json()["id"])
+    misses = [f for f in job["findings"] if f["type"] == "POTENTIAL_LEAK"]
+    assert misses and misses[0]["analyzer"].startswith("validator_audit:")
+    assert "987654321098" not in json.dumps(job["findings"])  # masked in value and evidence
