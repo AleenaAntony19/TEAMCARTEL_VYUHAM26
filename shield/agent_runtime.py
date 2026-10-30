@@ -82,7 +82,7 @@ class AutonomousAgent:
 
     def _emit(self, **ev):
         if self.on_event:
-            self.on_event({"agent": self.name, "depth": self.depth, **ev})
+            self.on_event({"agent": self.name, "depth": self.depth, "ts": time.time(), **ev})
 
     async def _call(self, name: str, args: dict) -> dict:
         if name == "spawn_specialist_agent":

@@ -77,7 +77,7 @@ def luhn_valid(s: str) -> bool:
 
 # ---------- patterns ----------
 PATTERNS: dict[str, re.Pattern] = {
-    "IN_AADHAAR": re.compile(r"\b[1-9]\d{3}[\s-]{0,3}\d{4}[\s-]{0,3}\d{4}\b"),
+    "IN_AADHAAR": re.compile(r"\b[2-9]\d{3}[\s-]{0,3}\d{4}[\s-]{0,3}\d{4}\b"),
     "IN_PAN": re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b"),
     # GSTIN: state code + PAN + entity digit + 'Z' + check char (from origin/development, layout tightened)
     "IN_GSTIN": re.compile(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b"),
@@ -116,14 +116,9 @@ def detect(text: str, layer: str = "visible") -> list[Entity]:
             val = m.group(0)
             score = 0.60
             if typ == "IN_AADHAAR":
-                if verhoeff_valid(val):
-                    score = 0.99
-                else:
-                    ctx = text.lower()
-                    if any(k in ctx for k in ("aadhaar", "uidai", "unique identification", "mera aadhaar", "vid", "government of india")):
-                        score = 0.85
-                    else:
-                        continue
+                if not verhoeff_valid(val):
+                    continue
+                score = 0.99
             elif typ == "IN_PAN":
                 score = 0.95
             elif typ == "IN_GSTIN":

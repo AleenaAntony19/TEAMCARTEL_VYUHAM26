@@ -663,6 +663,15 @@ def list_references():
 
 
 # ---------- discovery ----------
+SCOUT_EVENT_CAP = 3000
+
+
+def _scout_event(job: "Job", ev: dict) -> None:
+    evs = job.discovery.setdefault("events", []) if job.discovery is not None else None
+    if evs is not None and len(evs) < SCOUT_EVENT_CAP:
+        evs.append({"ts": time.time(), **ev})
+
+
 def _discover(job: Job, req: DiscoveryRequest, blocked_values: list[str]) -> None:
     from ..textscout import build_queries, firewall, get_provider
 
@@ -671,7 +680,9 @@ def _discover(job: Job, req: DiscoveryRequest, blocked_values: list[str]) -> Non
     checked = _run_stage(job, "privacy_firewall", lambda: [{"query": q, "allowed": firewall(q, blocked_values)} for q in queries])
     provider = get_provider()
     results: list[dict] = []
-    job.discovery = {"provider": provider.name, "queries": checked, "results": results, "crawl": None}
+    job.discovery = {"provider": provider.name, "queries": checked, "results": results, "crawl": None, "events": []}
+    for c in checked:
+        _scout_event(job, {"kind": "query", "query": c["query"], "allowed": c["allowed"], "provider": provider.name})
 
     def run_search():
         for q in [c["query"] for c in checked if c["allowed"]]:
@@ -734,7 +745,7 @@ async def _crawl(job: Job, results: list[dict], use_faces: bool = False) -> None
             })
 
     async def on_event(ev):
-        pass
+        _scout_event(job, ev)  # page fetched / blocked / robots-denied / error: public URLs and counters only
 
     task = asyncio.create_task(sched.run(fetcher, on_image, on_event))
     deadline = time.monotonic() + CRAWL_TIMEOUT
