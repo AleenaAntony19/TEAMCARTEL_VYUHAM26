@@ -3,7 +3,7 @@
 How the surfaces talk to the shared engine. Everything below is implemented and covered by tests in `tests/`.
 
 ```
-React (web/)  ── fetch /api/* ──────────────┐
+Vue (web/)    ── fetch /api/* ──────────────┐
 Dashboards    ── /api/v1/* (REST + SSE) ────┤──▶ shield/api (FastAPI: server.py + v1.py)
 VS Code (vscode/) ── spawn python -m shield.codescan / shield.llm (JSON on stdout)
                                               └──▶ shield/* engine (detect, review, redact, verify, scout, ledger)
@@ -16,11 +16,14 @@ VS Code (vscode/) ── spawn python -m shield.codescan / shield.llm (JSON on s
 | `GET /swarm/deliberate?job_id=` (SSE) | `start`, then per entity the persona `turn` events (round 1: PrivacyHawk CLAIM, PragmaticDev CHALLENGE, StatutoryAuditor CHECK; round 2: SwarmAdjudicator VERDICT), a `verdict`, and finally `end`. Values are masked |
 | `POST /shield/redact {job_id, selections, dry_run}` | `object_redact → red_team_attack (→ one aggressive retry) → consensus_ledger`; returns checks, status, `ledger_head`, `ledger_valid` |
 | `POST /scout/search` / `POST /scout/crawl` | firewalled queries → provider (`brave`, `google_cse`, `serper`, `offline`); crawl = registry seeds, SSRF guard, robots, 1 rps/domain, PDQ (+ opt-in faces) |
+| `GET /scout/registry` | sites the crawler may visit |
+| `POST /scout/review {job_id, match_id, decision}` | human confirm/reject of an image match, sealed in the ledger; confirm looks up hosting IPs |
+| `GET /ledger?job_id=` / `POST /ledger/tamper-demo?job_id=` | the job's hash chain; the demo edits a copy and shows verification catches it |
 | `GET /scout/events?job_id=` (SSE) | live discovery steps: firewall verdicts, search hits, pages fetched / blocked / robots-denied, image matches (public URLs only) |
 | `POST /scout/enroll` (photo, live selfie, consent) | int8 SFace vector kept in memory only; `DELETE` removes it |
 | `GET /dossier/export?job_id=` | ZIP: dossier.pdf, ledger.json, verify_ledger.py, README.txt |
 
-The unversioned `/api/*` routes used by the bundled React app are documented in [docs/API.md](docs/API.md).
+The unversioned `/api/*` routes used by the bundled web app are documented in [docs/API.md](docs/API.md).
 
 ## MCP (Model Context Protocol)
 - **stdio**: `python -m shield.mcp`. Use `SHIELD_MCP_ROOT` to limit which files a client may open. The VS Code command "Shield: Run AI Agent Swarm on Workspace (MCP)" uses this transport via `@modelcontextprotocol/sdk`.

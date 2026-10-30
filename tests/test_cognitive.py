@@ -213,6 +213,15 @@ def test_strip_exif_keeps_ai_findings_but_redact_clears_them(tmp_path, monkeypat
     assert not cognitive.scan_cognitive([tmp_path / "s.png"], tmp_path, False, True, {})
 
 
+def test_model_text_cannot_carry_a_value_into_the_cache(tmp_path, monkeypatch):
+    groq(monkeypatch)
+    item = {"value": DIAGNOSIS, "kind": "ID 123456789012", "severity": "high", "reason": "see PAN ABCPK1234F nearby"}
+    (tmp_path / "n.txt").write_text(f"Clinic list for today: {DIAGNOSIS}.\n")
+    cognitive.scan_cognitive([tmp_path / "n.txt"], tmp_path, True, False, {}, reply_with([item], []))
+    cache = (tmp_path / cognitive.CACHE).read_text()
+    assert "ABCPK1234F" not in cache and "123456789012" not in cache and DIAGNOSIS[:4] not in cache
+
+
 def test_claude_reply_with_prose_around_the_json_works(tmp_path, monkeypatch):
     monkeypatch.setenv("SHIELD_LLM_PROVIDER", "anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")

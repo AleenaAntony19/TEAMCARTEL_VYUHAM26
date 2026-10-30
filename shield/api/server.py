@@ -91,6 +91,7 @@ class Job:
     entities: dict[str, Entity] = field(default_factory=dict)  # finding id -> entity (never serialised)
     redaction: dict | None = None
     agent_run: dict | None = None  # binding LLM swarm run: status, events, result
+    summary: dict | None = None  # layers inspected and the document severity, for the case header
     discovery: dict | None = None
     error: str = ""
     cancel: threading.Event = field(default_factory=threading.Event)
@@ -103,7 +104,7 @@ class Job:
             "id": self.id, "kind": self.kind, "status": self.status, "created": self.created, "state": self.state,
             "display_name": self.display_name, "input_type": self.suffix.lstrip(".") or "text",
             "stages": [asdict(s) for s in self.stages], "findings": self.findings,
-            "redaction": self.redaction, "discovery": self.discovery, "error": self.error,
+            "redaction": self.redaction, "discovery": self.discovery, "error": self.error, "summary": self.summary,
             "agent_run": {k: v for k, v in self.agent_run.items() if k != "events"} | {"event_count": len(self.agent_run["events"])} if self.agent_run else None,
         }
 
@@ -155,7 +156,7 @@ def _drop(job: Job) -> None:
 def sweep() -> None:
     now = time.time()
     with LOCK:
-        expired = [j for j in JOBS.values() if now - j.created > JOB_TTL and j.status not in {"queued", "running"}]
+        expired = [j for j in JOBS.values() if now - j.created > JOB_TTL and j.status not in {"queued", "running"} and (j.agent_run or {}).get("status") != "running"]
         for j in expired:
             JOBS.pop(j.id, None)
     for j in expired:
@@ -278,6 +279,7 @@ def _analyse(job: Job, src: Path) -> None:
     audit = _run_stage(job, "validator_audit", lambda: audit_all_extracted_text(layers, entities))
     job.stages[-1].detail = f"{audit.verification_completeness_pct:.1f}% complete · {len(audit.potential_misses)} potential misses in {audit.total_tokens_scanned} tokens"
     job.raw = (entities, layers)
+    job.summary = {"layers": list(layers), "severity": detection.severity_band, "score": detection.severity_score}
     rec_by_key = {}
     ri = iter(records)
     for e in entities:  # records align with non-FACE entities in order
@@ -400,18 +402,46 @@ app.add_middleware(
 MAX_REQUEST_BYTES = int(os.getenv("SHIELD_MAX_REQUEST_MB", "50")) * 1024 * 1024
 
 
+SESSION_COOKIE = "shield_session"
+
+
+def _session_value() -> str:
+    return hashlib.sha256(API_TOKEN.encode()).hexdigest()
+
+
+def _authorized(request: Request) -> bool:
+    return secrets.compare_digest(request.headers.get("authorization", ""), f"Bearer {API_TOKEN}") or secrets.compare_digest(
+        request.cookies.get(SESSION_COOKIE, ""), _session_value())
+
+
 @app.middleware("http")
 async def guard(request: Request, call_next):
+    if "transfer-encoding" in request.headers:  # no Content-Length means the size limit below cannot apply
+        return JSONResponse({"detail": "Content-Length required"}, status_code=411)
     if int(request.headers.get("content-length") or 0) > MAX_REQUEST_BYTES:
         return JSONResponse({"detail": "request too large"}, status_code=413)
-    if request.url.path.startswith(("/api/", "/mcp")):
-        if API_TOKEN and not secrets.compare_digest(request.headers.get("authorization", ""), f"Bearer {API_TOKEN}"):
+    if request.url.path.startswith(("/api/", "/mcp")) and request.method != "OPTIONS":
+        if API_TOKEN and request.url.path != "/api/auth" and not _authorized(request):
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
         sweep()
     resp = await call_next(request)
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["Referrer-Policy"] = "no-referrer"
     resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+class AuthRequest(BaseModel):
+    token: str = Field(max_length=500)
+
+
+@app.post("/api/auth")
+def auth(body: AuthRequest, request: Request):
+    """Trade the API token for a cookie: browsers cannot add headers to EventSource or download links."""
+    if not API_TOKEN or not secrets.compare_digest(body.token, API_TOKEN):
+        raise HTTPException(401, "wrong token")
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie(SESSION_COOKIE, _session_value(), httponly=True, samesite="strict", secure=request.url.scheme == "https")
     return resp
 
 
@@ -437,6 +467,8 @@ def config():
     if provider.name != "offline":
         egress.append(f"Discovery search: firewall-approved query strings are sent to {provider.name}")
     egress.append("Discovery crawl (only when requested): HTTP GET requests to registry domains")
+    if not LOCAL_ONLY:
+        egress.append("Confirming an image match: its hostname is looked up at rdap.org")
     return {
         "local_only": LOCAL_ONLY,
         "limits": {
@@ -447,6 +479,7 @@ def config():
         "search_provider": provider.name,
         "llm": LLM_CFG.public(),
         "data_leaving_machine": egress,
+        "enrolled": len(ENROLLED),
         "face_regions": FACE_REGIONS,
     }
 
@@ -528,6 +561,8 @@ def redact_job(job_id: str, req: RedactRequest):
     job = _get(job_id)
     if job.status != "ready" or job.kind != "analysis":
         raise HTTPException(409, f"job is {job.status}; analysis must finish first")
+    if (job.agent_run or {}).get("status") == "running":
+        raise HTTPException(409, "the agent swarm is redacting this file; wait for it to finish")
     ents = _selected(job, req)
     src = job.workdir / f"input{job.suffix}"
 
@@ -561,7 +596,7 @@ def redact_job(job_id: str, req: RedactRequest):
     _advance(job, "consensus_ledger", {"status": "CLEAN" if clean else "FAILED", "output_sha256": hashlib.sha256(out.read_bytes()).hexdigest()})
     preview = ""
     try:
-        preview = verify._extract_text(out)[:20000]
+        preview = _masked(verify._extract_text(out)[:20000])  # anything the user chose to keep stays masked on screen
     except Exception:
         preview = "(preview unavailable: text extraction failed)"
     job.redaction = {
@@ -651,7 +686,10 @@ async def add_reference(file: UploadFile = File(...), label: str = Form("referen
     if img is None:
         raise HTTPException(422, "references must be PNG or JPEG images")
     rid = uuid.uuid4().hex[:8]
+    rows = len(REFERENCES)
     REFERENCES.add_reference(rid, label, cv2.cvtColor(img, cv2.COLOR_BGR2RGB), [])
+    if len(REFERENCES) == rows:
+        raise HTTPException(422, "this image has too little detail to fingerprint; use a photo or a detailed scan")
     del img, data  # only PDQ hashes are retained
     REF_LABELS.append({"id": rid, "label": label})
     return {"id": rid, "label": label, "stored": "PDQ hashes only (8 dihedral × regions); image discarded"}
@@ -672,11 +710,17 @@ def _scout_event(job: "Job", ev: dict) -> None:
         evs.append({"ts": time.time(), **ev})
 
 
+def _masked(text: str) -> str:
+    for e in detect(text):
+        text = text.replace(e.value, mask_value(e.value))
+    return text
+
+
 def _discover(job: Job, req: DiscoveryRequest, blocked_values: list[str]) -> None:
-    from ..textscout import build_queries, firewall, get_provider
+    from ..textscout import SearchError, build_queries, firewall, get_provider
 
     cfg = LLM_CFG if not LOCAL_ONLY else llm.LLMConfig()
-    queries = _run_stage(job, "build_queries", lambda: build_queries(req.org, req.entity_types, req.domain, cfg))
+    queries = _run_stage(job, "build_queries", lambda: build_queries(req.org, req.entity_types, req.domain, cfg, blocked_values))
     checked = _run_stage(job, "privacy_firewall", lambda: [{"query": q, "allowed": firewall(q, blocked_values)} for q in queries])
     provider = get_provider()
     results: list[dict] = []
@@ -690,17 +734,23 @@ def _discover(job: Job, req: DiscoveryRequest, blocked_values: list[str]) -> Non
                 raise Cancelled()
             try:
                 hits = provider.search(q)
+            except SearchError as exc:
+                job.stages[-1].detail = str(exc)
+                _scout_event(job, {"kind": "search_error", "provider": provider.name, "reason": str(exc)})
+                if exc.fatal:
+                    break
+                continue
             except Exception as exc:
                 job.stages[-1].detail = f"{provider.name} error: {type(exc).__name__}"
+                _scout_event(job, {"kind": "search_error", "provider": provider.name, "reason": job.stages[-1].detail})
                 continue
             for h in hits:
                 if any(r["source_url"] == h.get("url", "") and r["match_type"] == "text_search" for r in results):
                     continue  # several queries often return the same page
-                excerpt = h.get("snippet", "")
-                for e in detect(excerpt):
-                    excerpt = excerpt.replace(e.value, mask_value(e.value))
+                if not h.get("url"):
+                    continue
                 results.append({
-                    "source_url": h.get("url", ""), "title": h.get("title", "")[:200], "excerpt": excerpt[:300],
+                    "source_url": h["url"], "title": _masked(h.get("title", ""))[:200], "excerpt": _masked(h.get("snippet", ""))[:300],
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "match_type": "text_search",
                     "score": None, "evidence_status": "candidate: needs human review", "query": q,
                     "provider": h.get("provider", provider.name), "tier": h.get("tier"),
@@ -819,7 +869,7 @@ WEB_DIST = BASE / "web/dist"
 
 
 def mount_web() -> None:
-    """Mount the built React app last: a mount at "/" would shadow routes registered after it."""
+    """Mount the built web app last: a mount at "/" would shadow routes registered after it."""
     if WEB_DIST.exists():
         app.mount("/", StaticFiles(directory=WEB_DIST, html=True), name="web")
 
@@ -828,6 +878,7 @@ def main() -> None:
     import uvicorn
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # its INFO line prints request URLs, and Google CSE keeps the key in the URL
     uvicorn.run(app, host=os.getenv("SHIELD_HOST", "127.0.0.1"), port=int(os.getenv("SHIELD_PORT", "8000")))
 
 

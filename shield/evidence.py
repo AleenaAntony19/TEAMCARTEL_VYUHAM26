@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import hashlib
 from pathlib import Path
 
@@ -97,7 +98,7 @@ async def infra(url: str, headers: dict) -> dict:
     registrar = "unknown"
     abuse = []
     nameservers = []
-    rdap = await _rdap(f"https://rdap.org/domain/{host}")
+    rdap = None if os.getenv("SHIELD_LOCAL_ONLY") == "1" else await _rdap(f"https://rdap.org/domain/{host}")
     if rdap:
         for ent in rdap.get("entities", []):
             vcard = ent.get("vcardArray", [None, []])

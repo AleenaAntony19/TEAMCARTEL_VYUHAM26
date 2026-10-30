@@ -1,0 +1,129 @@
+:root {
+    --fascia: #FFFFFF;
+  --panel: #F4F5F3;
+  --ink: #1B1D20;
+  --line: #B5B8B6;
+  --blue: #4A6178;
+  --red: #C8312B;
+  --console: #17191B;
+  --console-ink: #D0D2D0;
+  --console-muted: #7E8286;
+  
+  --font-ui: 'Barlow Semi Condensed', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+/* Global Sharp Corner & Hairline Reset - No Border Radius Anywhere */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--fascia);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Keyboard Accessible Focus */
+:focus-visible {
+  outline: 2px solid var(--blue) !important;
+  outline-offset: 1px !important;
+}
+
+/* Monospace Utilities */
+.mono, code, pre, kbd {
+  font-family: var(--font-mono);
+}
+
+/* Flowing Scrape Animation for Red Dashed Crawl Edges */
+@keyframes scrapeFlow {
+  from {
+    stroke-dashoffset: 20;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.scrape-edge {
+  stroke: var(--red) !important;
+  stroke-width: 1.6px !important;
+  stroke-dasharray: 6 4 !important;
+  animation: scrapeFlow 1.2s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scrape-edge {
+    animation: none !important;
+  }
+  * {
+    transition-duration: 0.001ms !important;
+    animation-duration: 0.001ms !important;
+  }
+}
+
+/* Hairline borders */
+.border-line {
+  border: 1px solid var(--line);
+}
+
+.border-ink {
+  border: 1px solid var(--ink);
+}
+
+/* Custom Scrollbars - strictly sharp */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--fascia);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border: none;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--blue);
+}
+
+/* Shared controls for the steps */
+.field {
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  background: var(--fascia);
+  color: var(--ink);
+  font-size: 12px;
+}
+.form-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.form-row label { font-size: 11px; min-width: 160px; }
+.form-row .grow { flex: 1; }
+.check-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; font-size: 11px; }
+.check-row label { display: inline-flex; gap: 6px; align-items: center; }
+.err-line { color: var(--red); font-size: 11px; margin-top: 8px; }
+.data-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.data-table th, .data-table td { border: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: middle; }
+.data-table .field { margin-top: 0; padding: 4px; }
+.preserve { white-space: pre-wrap; word-break: break-word; }
+.selfie-video { width: 100%; max-height: 200px; background: var(--console); }
+a.action-btn, a.dc-btn { text-decoration: none; display: inline-block; text-align: center; }
+.dc-btn.disabled { opacity: 0.55; cursor: not-allowed; }
+.sev-critical, .sev-high { color: var(--red); }
+.agent-state.done { color: var(--blue); }
+.agent-state.error { color: var(--red); }

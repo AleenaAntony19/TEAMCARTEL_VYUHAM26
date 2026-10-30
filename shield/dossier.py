@@ -73,7 +73,7 @@ def _pdf(path: Path, report: dict):
         page.insert_textbox(
             pymupdf.Rect(50, 130, 545, 220),
             f"Page: {m['page_url']}\nImage: {m['image_url']}\nKind: {m['kind']} "
-            f"distance={m['pdq_distance']} similarity={m['similarity']}",
+            f"distance={m.get('pdq_distance')} similarity={m.get('similarity')}",
             fontsize=8,
         )
         img_bytes = base64.b64decode(thumb)

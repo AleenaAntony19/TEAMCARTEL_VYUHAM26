@@ -14,6 +14,7 @@ from typing import Callable
 
 from . import llm
 from .llm import parse_json
+from .review import mask_value
 from .mcp.tools import SESSIONS, server
 
 MAX_CHILDREN = 4
@@ -103,7 +104,7 @@ class AutonomousAgent:
         )
         self._emit(event="spawn", child=role, tools=allowed)
         sess = SESSIONS.get(self.session_id)
-        brief = [{"id": fid, "type": e.type, "masked": "•" * max(0, len(e.value) - 4) + e.value[-4:]} for fid, e in (sess.findings.items() if sess else [])][:40]
+        brief = [{"id": fid, "type": e.type, "masked": mask_value(e.value)} for fid, e in (sess.findings.items() if sess else [])][:40]
         result = await child.execute({"goal": args.get("goal", ""), "findings": brief}, max_steps=4)
         self.children.append(result)
         return {"agent": role, "steps": result.steps_taken, "verdict": result.verdict, "error": result.error}

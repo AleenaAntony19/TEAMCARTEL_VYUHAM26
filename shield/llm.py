@@ -19,7 +19,7 @@ import httpx
 PROVIDERS = {
     "groq": {
         "endpoint": "https://api.groq.com/openai/v1/chat/completions",
-        "model": "llama-3.1-8b-instant",
+        "model": "openai/gpt-oss-20b",
         "key_env": "GROQ_API_KEY",
     },
     "anthropic": {
@@ -184,7 +184,12 @@ def _post(cfg: LLMConfig, headers: dict, body: dict, transport: httpx.BaseTransp
                         return resp.json()
                     except ValueError:
                         raise LLMError("unexpected response shape") from None
-                last = f"HTTP {resp.status_code}"
+                try:
+                    err_json = resp.json()
+                    err_msg = err_json.get("error", {}).get("message") if isinstance(err_json, dict) else ""
+                    last = f"HTTP {resp.status_code} ({err_msg})" if err_msg else f"HTTP {resp.status_code}"
+                except Exception:
+                    last = f"HTTP {resp.status_code}"
                 if resp.status_code not in {408, 429, 500, 502, 503, 504, 529}:
                     break
                 if attempt < cfg.retries and resp.headers.get("retry-after"):
@@ -195,7 +200,8 @@ def _post(cfg: LLMConfig, headers: dict, body: dict, transport: httpx.BaseTransp
                         pass
             if attempt < cfg.retries:
                 time.sleep(min(4.0, 0.5 * 2**attempt))
-    raise LLMError(f"{cfg.provider} request failed: {last}")
+    # provider text can echo the request: the key must never reach an error, the UI or a log
+    raise LLMError(f"{cfg.provider} request failed: {last}".replace(cfg.api_key, "***")[:300])
 
 
 def complete(
@@ -280,7 +286,17 @@ def test_connection(cfg: LLMConfig, transport: httpx.BaseTransport | None = None
         complete(cfg, "Reply with the single word OK.", "ping", transport)
         return {"ok": True, "provider": cfg.provider, "model": cfg.model, "latency_ms": int((time.monotonic() - start) * 1000)}
     except LLMError as exc:
-        return {"ok": False, "provider": cfg.provider, "model": cfg.model, "error": str(exc)}
+        models_info = ""
+        if cfg.provider == "groq" and cfg.api_key:
+            try:
+                with httpx.Client(timeout=5, transport=transport) as client:
+                    r = client.get("https://api.groq.com/openai/v1/models", headers={"Authorization": f"Bearer {cfg.api_key}"})
+                    if r.status_code == 200:
+                        avail = [m["id"] for m in r.json().get("data", []) if not m["id"].startswith("whisper")]
+                        models_info = f" Available models for your key: {', '.join(avail)}"
+            except Exception:
+                pass
+        return {"ok": False, "provider": cfg.provider, "model": cfg.model, "error": f"{exc}.{models_info}"}
 
 
 ALLOWED_FIELDS = ("type", "rule", "engine", "analyzer", "severity", "confidence", "layer", "masked", "message")

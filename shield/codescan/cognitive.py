@@ -27,6 +27,7 @@ MAX_FILES = 30
 MIN_LETTERS = 20  # nothing to read in logos and diagrams, do not pay for them
 SEVERITIES = {"high", "medium", "low"}  # critical stays reserved for verified detector hits
 BLANK = "█"
+MASK = "•••"  # cached and shown: unlike mask(), keeps no character of a value no detector verified
 
 SYSTEM = (
     "You find sensitive data in text taken from a file: personal data of any kind and any country (health, "
@@ -58,13 +59,14 @@ def _items(text: str, reply: str) -> list[dict]:
         value = it.get("value") if isinstance(it, dict) else None
         if not isinstance(value, str) or len(value.strip()) < 3 or BLANK in value or value not in text:
             continue
-        kind = re.sub(r"[^A-Z0-9_]", "_", str(it.get("kind") or "SENSITIVE").upper())[:32]
+        kind = re.sub(r"[^A-Z_]", "_", str(it.get("kind") or "SENSITIVE").upper())[:32]  # no digits: a kind must not carry a value
         severity = it.get("severity")
         severity = severity if isinstance(severity, str) and severity in SEVERITIES else "medium"
         out.append({"value": value, "kind": kind, "severity": severity, "reason": " ".join(str(it.get("reason") or "").split())[:240]})
     for it in out:  # a reason can quote any value, not only its own
         for other in out:
-            it["reason"] = it["reason"].replace(other["value"], mask(other["value"], other["kind"]))
+            it["reason"] = it["reason"].replace(other["value"], MASK)
+        it["reason"] = blank_known(it["reason"])
     return out
 
 
@@ -141,7 +143,7 @@ def _note_findings(path: Path, rel: str, _ocr: bool, cfg, transport) -> tuple[li
 
 def _finding(it: dict, rel: str, where: str, message: str, fixes: list[str], bbox: list[int] | None = None, line: int = 0, col: int = 0, end_col: int = 0) -> Finding:
     return Finding(fingerprint("AI_SENSITIVE", rel, where, it["value"]), "cognitive", "AI_SENSITIVE", it["severity"], rel, line, col, line, end_col,
-                   message, mask(it["value"], it["kind"]), fixes, confidence=0.6, bbox=bbox, rationale=it["reason"])
+                   message, MASK, fixes, confidence=0.6, bbox=bbox, rationale=it["reason"])
 
 
 def _load(root: Path) -> dict:

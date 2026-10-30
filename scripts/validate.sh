@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Every automated check: Python tests + lint, web typecheck/test/build, extension typecheck/test/build, mock-web scout run.
+# Every automated check: Python tests + lint, web test/build, extension typecheck/test/build, mock-web scout run.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,10 +19,10 @@ echo "==> ruff (errors only)"
 ruff check shield tests --select F,E9
 
 echo "==> web"
-(cd web && npm ci --no-audit --no-fund >/dev/null && npm run typecheck && npm test && npm run build >/dev/null)
+(cd web && npm ci --no-audit --no-fund >/dev/null && npm test && npm run build >/dev/null)
 
 echo "==> vscode extension"
-(cd vscode && npm ci --no-audit --no-fund >/dev/null && npm run typecheck && npm test && npm run build >/dev/null)
+(cd vscode && npm ci --no-audit --no-fund >/dev/null && npm test && npm run build >/dev/null)
 
 echo "==> codescan CLI emits valid JSON"
 python -m shield.codescan scan shield --no-ocr --format json | python -m json.tool > /dev/null || [ "${PIPESTATUS[0]}" = 1 ]

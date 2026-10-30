@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import shutil
+from typing import Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -129,8 +131,8 @@ def dossier(job_id: str):
         "job": {"id": j.id, "kind": j.kind, "state": j.state, "input_type": j.suffix.lstrip(".")},
         "doc": {"status": red.get("status"), "checks": red.get("checks"), "output_sha256": red.get("sha256"),
                 "finding_types": sorted({f["type"] for f in j.findings})},
-        "scout": {"provider": disc.get("provider"), "text_hits": [{k: r.get(k) for k in ("source_url", "title", "evidence_status")} for r in disc.get("results", []) if not r.get("thumb_b64")],
-                  "matches": [r for r in disc.get("results", []) if r.get("thumb_b64")]},
+        "scout": {"provider": disc.get("provider"), "text_hits": [{k: r.get(k) for k in ("source_url", "title", "evidence_status")} for r in disc.get("results", []) if r["match_type"] == "text_search" and r.get("provider") != "offline"],
+                  "matches": [{**r, "page_url": r["source_url"], "verdict": r.get("review") or r["evidence_status"]} for r in disc.get("results", []) if r.get("thumb_b64")]},
         "ledger_head": j.ledger.blocks[-1]["current_hash"] if j.ledger.blocks else None,
     }
     out = j.workdir / "dossier"
@@ -212,6 +214,57 @@ def swarm_run(body: SwarmRunBody):
     j.agent_run = {"status": "running", "events": [], "result": None, "error": ""}
     server.SWARM_POOL.submit(_swarm_job, j)
     return {"job_id": j.id, "status": "running"}
+
+
+@router.get("/ledger", tags=["dossier"])
+def ledger(job_id: str):
+    """The job's SHA-256 hash chain. `first_bad` is null while the chain verifies."""
+    j = server._get(job_id)
+    return {"blocks": j.ledger.blocks, "first_bad": j.ledger.verify()}
+
+
+@router.post("/ledger/tamper-demo", tags=["dossier"])
+def ledger_tamper_demo(job_id: str):
+    """Edits a copy of the chain to prove verification catches it. The real ledger is never touched."""
+    j = server._get(job_id)
+    blocks = copy.deepcopy(j.ledger.blocks)
+    if not blocks:
+        raise HTTPException(409, "ledger is empty")
+    victim = blocks[len(blocks) // 2]
+    victim["actor"] = "tampered"
+    return {"tampered_seq": victim["seq"], "first_bad": j.ledger.verify(blocks)}
+
+
+@router.get("/scout/registry", tags=["scout"])
+def scout_registry():
+    """Sites the crawler is allowed to visit."""
+    from ..registry import load_registry
+
+    return [{k: r.get(k) for k in ("domain", "category", "tier", "entry_urls")} for r in load_registry(server.REGISTRY)]
+
+
+class ReviewBody(BaseModel):
+    job_id: str
+    match_id: str
+    decision: Literal["confirm", "reject"]
+
+
+@router.post("/scout/review", tags=["scout"])
+async def scout_review(body: ReviewBody):
+    """Human verdict on a crawl match, sealed in the ledger. Reject drops the thumbnail; confirm looks up the hosting IPs."""
+    from ..evidence import infra
+
+    j = server._get(body.job_id)
+    match = next((r for r in (j.discovery or {}).get("results", []) if r.get("id") == body.match_id), None)
+    if match is None:
+        raise HTTPException(404, "unknown match")
+    match["review"] = "confirmed" if body.decision == "confirm" else "rejected"
+    if body.decision == "reject":
+        match.pop("thumb_b64", None)
+    else:
+        match["infra"] = await infra(match["source_url"], {})
+    j.ledger.append("human", "MATCH_REVIEW", {"match_id": body.match_id, "decision": match["review"]})
+    return match
 
 
 @router.get("/swarm/events", tags=["swarm"])

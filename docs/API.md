@@ -1,6 +1,6 @@
 # Shield·Scout API
 
-The versioned dashboard contract (`/api/v1/...`) is in [../connections.md](../connections.md). The routes below are the ones the bundled React app uses.
+The versioned dashboard contract (`/api/v1/...`) is in [../connections.md](../connections.md). The routes below are the ones the bundled web app uses.
 
 Base: `http://127.0.0.1:8000`. Live OpenAPI schema: `/docs` (Swagger) and `/openapi.json`. All bodies are JSON unless noted. If `SHIELD_API_TOKEN` is set, every `/api/*` call needs `Authorization: Bearer <token>`.
 

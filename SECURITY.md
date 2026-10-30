@@ -2,7 +2,7 @@
 
 ## Deployment model (read before exposing the API)
 - **Development / single-user tool.** There are no user accounts. The API binds to `127.0.0.1` by default. All jobs, reference hashes and the runtime LLM key are shared by whoever can reach the port.
-- To put it on a network: set `SHIELD_API_TOKEN` (bearer auth on every `/api` call), terminate TLS in a reverse proxy, restrict `SHIELD_CORS_ORIGINS`, and run one instance per user or add real authn/authz first. It is **not production-ready** as a multi-tenant service.
+- To put it on a network: set `SHIELD_API_TOKEN` (bearer auth on every `/api` call; the web UI asks for the token once and keeps a strict HttpOnly cookie), terminate TLS in a reverse proxy, restrict `SHIELD_CORS_ORIGINS`, and run one instance per user or add real authn/authz first. It is **not production-ready** as a multi-tenant service.
 
 ## What can leave the machine
 | When | What | Where |

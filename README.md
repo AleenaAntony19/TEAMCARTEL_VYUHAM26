@@ -8,7 +8,7 @@ Three connected surfaces share one Python engine (`shield/`):
 
 | Surface | What it does | Run |
 |---|---|---|
-| **Web app** (`web/`, React + Vite) | Paste text or upload PDF/DOCX/XLSX/PNG/JPG/TXT → findings with severity, confidence, masked evidence and location → choose token/mask/remove per finding → preview → apply → verification → download (only if every check passed). Also discovery, reference images, an activity view and an **AI provider** tab (Groq / Claude). | `python -m shield.api` → <http://127.0.0.1:8000> |
+| **Web app** (`web/`, Vue + Vite + D3) | Upload PDF/DOCX/XLSX/PNG/JPG/TXT → findings with severity and masked values → choose token/mask/remove per finding → apply → verification → download (only if every check passed). Also discovery, reference images, an activity view and an **AI provider** tab (Groq / Claude). | `python -m shield.api` → <http://127.0.0.1:8000> |
 | **Backend API** (`shield/api/`, FastAPI) | `/api/v1` contract: `shield/analyze`, `shield/redact`, `scout/search`, `scout/crawl`, `scout/enroll`, `swarm/deliberate` (SSE), `dossier/export`. Async jobs move through a checked graph (`intake → deliberate → object_redact → red_team_attack → consensus_ledger`) with a per-job SHA-256 ledger. OpenAPI at `/docs`; see [connections.md](connections.md) and [docs/API.md](docs/API.md). | same |
 | **VS Code extension** (`vscode/`) | Scans the workspace (secrets, Indian PII, bandit SAST, risky config, images with OCR, PDFs/Office files) with bounded parallel analyzers, progress, cancellation and timeouts; diagnostics + findings tree; quick fixes with a diff preview and an explicit confirmation step; an **AI Provider** panel (Groq / Claude). | see [vscode/README.md](vscode/README.md) |
 
@@ -21,7 +21,7 @@ python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 brew install tesseract poppler                    # OCR + pdftotext (used by verification)
 bash scripts/get_models.sh                        # YuNet/SFace ONNX models (face *region* detection)
-cp .env.example .env                              # optional: fill in only what you use
+cp .env.example .env                              # optional: fill in only what you use (git-ignored, read at server start)
 
 (cd web && npm ci && npm run build)               # web UI, served by the API from web/dist
 PYTHONPATH=$PWD python -m shield.api              # http://127.0.0.1:8000  (API docs: /docs)
@@ -30,6 +30,8 @@ PYTHONPATH=$PWD python -m shield.api              # http://127.0.0.1:8000  (API 
 Development UI with hot reload: `cd web && npm run dev` (http://localhost:5173, proxies `/api` to port 8000).
 
 Run every check: `bash scripts/validate.sh`.
+
+The crawl registry ([registry/seeds.yaml](registry/seeds.yaml)) ships with the local demo sites only. To try image matching, run `python demo/serve.py` and start the API with `SHIELD_ALLOW_LOCAL=1`; for real use, replace the seeds with sites you may crawl.
 
 ## How it works
 
@@ -67,13 +69,13 @@ Queries are built from organisation/domain and entity *types* only (plus up to 4
 - the SwarmAdjudicator's plan is **executed**;
 - a red team attacks, with up to 3 replan cycles.
 
-The web app shows each run as a live **3D graph** (three.js via `3d-force-graph`, lazy-loaded). Agents are spheres with step and token badges, MCP tools are satellites, and every particle along a link is a real message or tool call. A terminal-style **live log** sits underneath, and clicking a sphere filters the log to that agent. Discovery gets the same view for crawling: per-site *area* cards (host + section) with their status, a "now scraping" bar, and the crawl graph.
+The web app shows each run as a live D3 force graph: agents, MCP tools, sensitive data types and scraped sites as nodes, with crawl edges in flowing red. A console strip underneath logs every real event, and clicking a node shows its details.
 
 Start it with "Run AI agent swarm" in the web app, `POST /api/v1/swarm/run`, or the VS Code command. Safety floor, grounding and token numbers are in [agents.md](agents.md).
 
 ## AI providers (optional)
 
-Deterministic analysis never needs an LLM. A provider only adds plain-language explanations and extra discovery queries. Configure it in the web **AI provider** tab, the VS Code **AI Provider** panel, or env vars:
+Deterministic analysis never needs an LLM. A provider only adds plain-language explanations and extra discovery queries. Configure it in Step 2 of the web app, the VS Code **AI Provider** panel, or env vars:
 
 | Variable | Meaning |
 |---|---|
@@ -107,6 +109,6 @@ See [SECURITY.md](SECURITY.md) for the threat model, the dev-only deployment ass
 
 `bash scripts/validate.sh` runs:
 - pytest: detection, review, redaction for every format, verification (fail-closed), API flows, upload limits, SSRF, LLM providers, codescan, PCA;
-- web: typecheck, unit tests and build;
+- web: unit tests and build;
 - extension: typecheck, unit tests and build;
 - the mock-web scout run.
