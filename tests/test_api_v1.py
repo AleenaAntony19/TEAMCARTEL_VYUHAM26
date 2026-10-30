@@ -175,3 +175,12 @@ def test_mcp_streamable_http_lists_tools(client):
     assert r.status_code == 200, r.text
     names = {t["name"] for t in r.json()["result"]["tools"]}
     assert {"validate_checksum", "execute_destructive_redaction", "run_agent_swarm"} <= names
+
+
+def test_scout_events_stream(client):
+    jid = client.post("/api/v1/scout/search", json={"org": "Acme Corp", "domain": "acme.in", "entity_types": ["IN_PAN"]}).json()["job_id"]
+    with client.stream("GET", f"/api/v1/scout/events?job_id={jid}") as r:
+        body = "".join(r.iter_text())
+    events = [json.loads(line[5:]) for line in body.splitlines() if line.startswith("data:")]
+    kinds = {e.get("kind") for e in events}
+    assert "query" in kinds and "end" in body and all("ts" in e for e in events if "kind" in e)

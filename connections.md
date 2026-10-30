@@ -16,6 +16,7 @@ VS Code (vscode/) ── spawn python -m shield.codescan / shield.llm (JSON on s
 | `GET /swarm/deliberate?job_id=` (SSE) | `start`, then per entity the persona `turn` events (round 1: PrivacyHawk CLAIM, PragmaticDev CHALLENGE, StatutoryAuditor CHECK; round 2: SwarmAdjudicator VERDICT), a `verdict`, and finally `end`. Values are masked |
 | `POST /shield/redact {job_id, selections, dry_run}` | `object_redact → red_team_attack (→ one aggressive retry) → consensus_ledger`; returns checks, status, `ledger_head`, `ledger_valid` |
 | `POST /scout/search` / `POST /scout/crawl` | firewalled queries → provider (`brave`, `google_cse`, `serper`, `offline`); crawl = registry seeds, SSRF guard, robots, 1 rps/domain, PDQ (+ opt-in faces) |
+| `GET /scout/events?job_id=` (SSE) | live discovery steps: firewall verdicts, search hits, pages fetched / blocked / robots-denied, image matches (public URLs only) |
 | `POST /scout/enroll` (photo, live selfie, consent) | int8 SFace vector kept in memory only; `DELETE` removes it |
 | `GET /dossier/export?job_id=` | ZIP: dossier.pdf, ledger.json, verify_ledger.py, README.txt |
 

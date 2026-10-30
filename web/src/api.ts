@@ -90,6 +90,7 @@ export const api = {
   references: () => call<{ references: { id: string; label: string }[]; hash_rows: number }>("/api/references"),
   swarmRun: (job_id: string) => call<{ status: string }>("/api/v1/swarm/run", { method: "POST", body: json({ job_id }) }),
   swarmEventsUrl: (job_id: string) => `/api/v1/swarm/events?job_id=${encodeURIComponent(job_id)}`,
+  scoutEventsUrl: (job_id: string) => `/api/v1/scout/events?job_id=${encodeURIComponent(job_id)}`,
   llm: () => call<LLMState>("/api/llm"),
   setLlm: (body: { provider: string; model: string; endpoint: string; api_key: string; timeout: number; retries: number }) =>
     call<LLMState>("/api/llm", { method: "PUT", body: json(body) }),

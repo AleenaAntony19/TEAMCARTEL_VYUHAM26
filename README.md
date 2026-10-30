@@ -67,6 +67,8 @@ Queries are built from organisation/domain and entity *types* only (plus up to 4
 - the SwarmAdjudicator's plan is **executed**;
 - a red team attacks, with up to 3 replan cycles.
 
+The web app shows each run as a live **3D graph** (three.js via `3d-force-graph`, lazy-loaded). Agents are spheres with step and token badges, MCP tools are satellites, and every particle along a link is a real message or tool call. A terminal-style **live log** sits underneath, and clicking a sphere filters the log to that agent. Discovery gets the same view for crawling: per-site *area* cards (host + section) with their status, a "now scraping" bar, and the crawl graph.
+
 Start it with "Run AI agent swarm" in the web app, `POST /api/v1/swarm/run`, or the VS Code command. Safety floor, grounding and token numbers are in [agents.md](agents.md).
 
 ## AI providers (optional)
