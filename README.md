@@ -577,23 +577,4 @@ Do the AF-13 core first. Judges score it first.
 
 ---
 
-## 17. Judge Q&A
 
-- **"Can the LLM go rogue?"** It only emits specs. A deterministic Guard validates them, agents have no write or outbound tools, and every step is budgeted and logged.
-- **"Are you scraping Google?"** No. We use official search APIs behind a provider interface, so we respect terms and rate limits.
-- **"Does the victim's data go to Google or Anthropic?"** Sensitive values never do. The Query Firewall and the masking layer block them, and the tests prove it.
-- **"What if the web page attacks your agent?"** Page text is data only. Output is schema-constrained, agents have no dangerous tools, and findings stay untrusted until a human confirms.
-- **"What if Claude is unavailable?"** Every LLM step has a deterministic fallback.
-- **"Why dynamic agents at all?"** Different cases need different research. A scam case and a document leak need different strategies. Specs let the system adapt without new code, and the Guard keeps that adaptability safe.
-
----
-
-## 18. Limitations (be honest on the slide)
-
-- Search APIs return only indexed public pages. Private groups, WhatsApp and Telegram are out of reach.
-- Research findings are leads for human review, not proof.
-- OCR is weak on handwriting and poor scans.
-- Python cannot guarantee memory zeroing.
-- Legal references (NCRP categories, IT Rules, BSA §63) and the search API's current terms must be verified before the pitch.
-- Running research against abuse sites means touching illegal content. A real deployment needs legal review and an institutional partner.
-- This is a hackathon prototype, not legal advice.
