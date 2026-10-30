@@ -3,9 +3,7 @@
 Scans the open workspace with the local Shield·Scout engine and shows findings in **Problems** (inline diagnostics) and the **Shield·Code → Findings** view.
 
 ## Install (no Python needed)
-Download the build for your OS from the GitHub Release (`shield-code-win32-x64.vsix`, `-darwin-arm64`, `-linux-x64`) and run **Extensions: Install from VSIX…**. The build bundles the scanner engine, so nobody needs Python. OCR needs Tesseract: the Windows build includes it; on macOS/Linux install it (`brew install tesseract` / `apt install tesseract-ocr`), or OCR is reported as unavailable while everything else works.
-
-Antigravity, Cursor and VSCodium install from Open VSX; VS Code installs from the Marketplace (once the publisher tokens are set; see the main README).
+Get the `.vsix` built for your OS (see the main README) and run **Extensions: Install from VSIX…**. The build bundles the scanner engine, so nobody needs Python. OCR needs Tesseract: the Windows build includes it; on macOS/Linux install it (`brew install tesseract` / `apt install tesseract-ocr`), or OCR is reported as unavailable while everything else works.
 
 **Developers** (no bundled engine): set `shieldCode.pythonPath` to a Python 3.11 with `requirements.txt`, and `shieldCode.enginePath` to the `shield_scout` folder. On Windows, leaving `pythonPath` empty uses the `py -3` launcher.
 

@@ -10,7 +10,7 @@ delete process.env.ELECTRON_RUN_AS_NODE; // set when launched from a VS Code ter
 const here = path.dirname(new URL(import.meta.url).pathname);
 const ext = path.resolve(here, "../..");
 const engine = path.resolve(ext, "..");
-const python = process.env.SHIELD_PYTHON || "/Users/aaronr/py311/bin/python";
+const python = process.env.SHIELD_PYTHON || "python3";
 
 const ws = mkdtempSync(path.join(tmpdir(), "shield-ws-"));
 const key = "sk-proj-" + randomBytes(36).toString("base64url").replace(/[-_]/g, "a").slice(0, 48);
