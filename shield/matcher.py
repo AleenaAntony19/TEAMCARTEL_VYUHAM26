@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -30,7 +31,9 @@ def _blur_thumb(img_bgr: np.ndarray) -> bytes:
 
 cv2.setNumThreads(1)  # a small host has far fewer CPUs than cv2 sees: extra threads starve the website
 _HASHER = ThreadPoolExecutor(1, thread_name_prefix="hash")  # fetches stay parallel, CPU work takes turns
-MAX_PDF_PAGES, MAX_PDF_IMAGES, MAX_PDF_IMAGE_PIXELS = 50, 40, 40_000_000
+MAX_PDF_PAGES, MAX_PDF_IMAGES = 50, 40
+MAX_IMAGE_PIXELS = 16_000_000  # about 48 MB decoded
+HASH_SIDE = 1024
 
 
 def _pdf_images(data: bytes) -> list[bytes]:
@@ -38,7 +41,7 @@ def _pdf_images(data: bytes) -> list[bytes]:
     try:
         with pymupdf.open(stream=data, filetype="pdf") as doc:
             xrefs = {i[0]: i for p in doc.pages(0, min(len(doc), MAX_PDF_PAGES)) for i in p.get_images(full=True)}
-            return [doc.extract_image(x)["image"] for x, i in list(xrefs.items())[:MAX_PDF_IMAGES] if i[2] * i[3] <= MAX_PDF_IMAGE_PIXELS]
+            return [doc.extract_image(x)["image"] for x, i in list(xrefs.items())[:MAX_PDF_IMAGES] if i[2] * i[3] <= MAX_IMAGE_PIXELS]
     except Exception:
         return []
 
@@ -88,6 +91,13 @@ class Matcher:
         return next((m for m in hits if m), None)  # shortcut: a PDF reports its first match only; list them all if reviewers need that
 
     def _match_one(self, page_url: str, image_url: str, data: bytes, res) -> Match | None:
+        try:
+            width, height = Image.open(io.BytesIO(data)).size  # reads the header only: a 5 MB file can decode to gigabytes
+        except Exception:
+            return None
+        if width * height > MAX_IMAGE_PIXELS:
+            self.failed += 1  # shortcut: giant images go unchecked and are counted, decode them scaled down if real leaks need it
+            return None
         arr = np.frombuffer(data, np.uint8)
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if img is None:
@@ -97,6 +107,9 @@ class Matcher:
             del data, arr, img
             return None
 
+        if max(img.shape[:2]) > HASH_SIDE:  # PDQ downsamples anyway, so the hash barely moves and the copies below stay small
+            scale = HASH_SIDE / max(img.shape[:2])
+            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         vecs = face.vectors(img) if self.enrolled else []  # slow, and only an enrolment uses it
         boxes = [b for _, b in vecs]
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)

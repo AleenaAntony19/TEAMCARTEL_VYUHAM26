@@ -400,3 +400,28 @@ def test_small_images_are_not_collected():
 
     html = '<img src="/flag.png" width="20"><img src="/photo.jpg" width="300"><img src="/plain.jpg">'
     assert _image_urls(BeautifulSoup(html, "html.parser"), "https://w.org/") == {"https://w.org/photo.jpg", "https://w.org/plain.jpg"}
+
+
+def test_a_giant_image_is_counted_not_decoded(monkeypatch):
+    import asyncio
+    import io
+
+    from PIL import Image
+
+    from shield import pdq
+    from shield.matcher import Matcher, cv2 as matcher_cv2
+    from shield.models import ImageRef
+
+    buf = io.BytesIO()
+    Image.new("L", (5000, 4000)).save(buf, "PNG")
+
+    class Res:
+        blocked_reason, headers, body = None, {}, buf.getvalue()
+
+    class F:
+        async def get(self, url):
+            return Res()
+
+    monkeypatch.setattr(matcher_cv2, "imdecode", lambda *a: (_ for _ in ()).throw(AssertionError("must not decode")))
+    m = Matcher([], pdq.HashBank())
+    assert asyncio.run(m.on_image(ImageRef("p", "i", "d"), F())) is None and m.failed == 1

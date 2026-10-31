@@ -30,5 +30,5 @@ USER shield
 # main() refuses this bind unless SHIELD_API_TOKEN or SHIELD_PUBLIC_DEMO is set. The port comes from PORT (default 8000).
 ENV SHIELD_HOST=0.0.0.0
 # tesseract and numpy size their thread pools from the host, not the plan's CPU share
-ENV OMP_THREAD_LIMIT=1 OPENBLAS_NUM_THREADS=1
+ENV OMP_THREAD_LIMIT=1 OPENBLAS_NUM_THREADS=1 MALLOC_ARENA_MAX=2
 CMD ["python", "-m", "shield.api"]
