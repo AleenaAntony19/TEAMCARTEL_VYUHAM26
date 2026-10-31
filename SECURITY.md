@@ -2,6 +2,7 @@
 
 ## Deployment model (read before exposing the API)
 - **Development / single-user tool.** There are no user accounts. The API binds to `127.0.0.1` by default. All jobs, reference hashes and the runtime LLM key are shared by whoever can reach the port.
+- Public demo mode (`SHIELD_PUBLIC_DEMO=1`) has no login. Each visitor's AI key stays in their browser tab and is sent per request. Changing the server's AI settings, wiping the session and face enrolment are refused. Reference image hashes are still shared by all visitors until a restart, so do not use it for real cases.
 - To put it on a network: set `SHIELD_API_TOKEN` (bearer auth on every `/api` call; the web UI asks for the token once and keeps a strict HttpOnly cookie), terminate TLS in a reverse proxy, restrict `SHIELD_CORS_ORIGINS`, and run one instance per user or add real authn/authz first. It is **not production-ready** as a multi-tenant service.
 
 ## What can leave the machine

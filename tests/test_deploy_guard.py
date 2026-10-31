@@ -108,3 +108,23 @@ with ThreadPoolExecutor(8) as pool:
         pytest.skip("face models not downloaded")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
     assert out.returncode == 0 and out.stdout.strip() == "120", out.stderr[-300:]
+
+
+def test_public_demo_closes_server_wide_switches(monkeypatch):
+    monkeypatch.setenv("SHIELD_PUBLIC_DEMO", "1")
+    monkeypatch.setattr(server, "LLM_CFG", server.llm.configure(server.llm.LLMConfig(), provider="groq", api_key="server-key"))
+    c = TestClient(server.app)
+    body = {"provider": "groq", "model": "", "endpoint": "https://evil.example/x", "api_key": "", "timeout": 20, "retries": 1}
+    assert c.put("/api/llm", json=body).status_code == 403, "a visitor must not redirect the server key"
+    assert server.LLM_CFG.api_key == "server-key" and "evil" not in server.LLM_CFG.endpoint
+    assert c.delete("/api/session").status_code == 403, "a visitor must not wipe everyone"
+    assert c.delete("/api/v1/scout/enroll").status_code == 403
+    assert c.post("/api/llm/test").status_code == 409, "strangers must not spend the server key"
+    assert c.get("/api/config").json()["public_demo"] is True
+
+
+def test_public_demo_does_not_excuse_the_local_crawl_flag(monkeypatch):
+    monkeypatch.setenv("SHIELD_PUBLIC_DEMO", "1")
+    monkeypatch.setenv("SHIELD_ALLOW_LOCAL", "1")
+    with pytest.raises(SystemExit, match="SHIELD_ALLOW_LOCAL"):
+        server._refuse_unsafe_bind("0.0.0.0")

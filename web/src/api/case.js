@@ -197,7 +197,9 @@ export async function tamperDemo(id) {
 }
 
 export async function wipeAll() {
-  await api.clearSession()
+  // an open site is shared: a visitor deletes their own case, never everyone's
+  if (config.value?.public_demo) await Promise.all([session.jobId, session.scoutJobId].filter(Boolean).map(api.remove))
+  else await api.clearSession()
   stopAll()
   resetSession()
   refreshConfig()

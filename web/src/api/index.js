@@ -1,6 +1,20 @@
 // Client for the Shield·Scout API. All calls are same-origin /api/*.
+import { reactive } from 'vue'
+
+// The visitor's choice. The key stays in this tab's memory and goes only in request headers; a refresh forgets it.
+export const ai = reactive({ mode: 'rules', provider: 'anthropic', key: '', model: '' })
+
+function aiHeaders(headers) {
+  if (ai.mode === 'rules') return headers.set('X-Shield-LLM-Provider', 'none')
+  if (!ai.key) return // no key typed: use the server's own, if it has one
+  headers.set('X-Shield-LLM-Provider', ai.provider)
+  headers.set('X-Shield-LLM-Key', ai.key)
+  if (ai.model) headers.set('X-Shield-LLM-Model', ai.model)
+}
+
 async function call(path, init = {}, retry = true) {
   const headers = new Headers(init.headers)
+  aiHeaders(headers)
   if (typeof init.body === 'string') headers.set('Content-Type', 'application/json')
   const res = await fetch(path, { ...init, headers })
   if (res.status === 401 && retry) {
@@ -41,6 +55,7 @@ export const api = {
   downloadUrl: (id) => `/api/jobs/${id}/download`,
   previewImageUrl: (id, sha) => `/api/jobs/${id}/preview.png?v=${sha}`,
   clearSession: () => call('/api/session', { method: 'DELETE' }),
+  remove: (id) => call(`/api/jobs/${id}`, { method: 'DELETE' }),
   discover: (body) => post('/api/discovery', body),
   addReference: (file, label) => form('/api/references', { file, label, authorized: 'true' }),
   references: () => call('/api/references'),
@@ -61,7 +76,5 @@ export const api = {
   swarmEventsUrl: (id) => `/api/v1/swarm/events?job_id=${q(id)}`,
   scoutEventsUrl: (id) => `/api/v1/scout/events?job_id=${q(id)}`,
   deliberateUrl: (id) => `/api/v1/swarm/deliberate?job_id=${q(id)}`,
-  llm: () => call('/api/llm'),
-  setLlm: (body) => call('/api/llm', { method: 'PUT', body: json(body) }),
   testLlm: () => post('/api/llm/test')
 }

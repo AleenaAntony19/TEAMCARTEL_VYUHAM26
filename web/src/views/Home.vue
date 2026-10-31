@@ -48,6 +48,31 @@
             </label>
           </div>
 
+          <div class="consent-box mode-box">
+            <span class="mono mode-title">HOW SHOULD THIS RUN?</span>
+            <label class="consent-checkbox-label">
+              <input type="radio" value="rules" v-model="ai.mode" />
+              <span class="consent-text"><strong>Rules only:</strong> fixed detectors, no key needed. Nothing goes to an AI. The same file always gives the same result.</span>
+            </label>
+            <label class="consent-checkbox-label" :class="{ muted: config.value?.local_only }">
+              <input type="radio" value="ai" v-model="ai.mode" :disabled="config.value?.local_only" />
+              <span class="consent-text"><strong>Rules + AI:</strong> adds the agent swarm and search triage with your own key. Results can vary, and AI can be wrong. Rules still run.</span>
+            </label>
+            <div v-if="ai.mode === 'ai'" class="form-row">
+              <label class="mono">PROVIDER
+                <select class="field mono" v-model="ai.provider">
+                  <option value="anthropic">Anthropic Claude</option>
+                  <option value="groq">Groq</option>
+                </select>
+              </label>
+              <label class="mono grow">YOUR API KEY (kept in this tab only)
+                <input class="field mono" type="password" autocomplete="off" v-model.trim="ai.key" :placeholder="serverKey ? 'optional: this server has a key' : 'paste key'" />
+              </label>
+              <button class="demo-btn mono" type="button" :disabled="!ai.key && !serverKey" @click="testKey">TEST KEY</button>
+            </div>
+            <p v-if="keyNote" class="mono key-note">{{ keyNote }}</p>
+          </div>
+
           <div class="actions-row">
             <button class="start-btn mono" :disabled="!canStart || starting" @click="startNewCase">
               🚀 {{ starting ? 'UPLOADING…' : 'INGEST & START CASE WORKSPACE' }}
@@ -70,6 +95,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { config } from '../store/session'
 import { createCase, refreshConfig } from '../api/case'
+import { ai, api } from '../api/index'
 
 const router = useRouter()
 const fileInputRef = ref(null)
@@ -82,11 +108,23 @@ const error = ref('')
 
 const hasText = computed(() => pastedText.value.trim().length > 0)
 const canStart = computed(() => (selectedFile.value || hasText.value) && consentAffirmed.value)
+const keyNote = ref('')
+const serverKey = computed(() => !!config.value?.llm.key_set)
 const modeLabel = computed(() => {
   const c = config.value
   if (!c) return 'CONNECTING…'
-  return c.local_only ? 'LOCAL-ONLY MODE' : `LLM: ${c.llm.provider.toUpperCase()} · SEARCH: ${c.search_provider.toUpperCase()}`
+  return c.local_only ? 'LOCAL-ONLY MODE' : `${ai.mode === 'ai' ? 'RULES + AI' : 'RULES ONLY'} · SEARCH: ${c.search_provider.toUpperCase()}`
 })
+
+const testKey = async () => {
+  keyNote.value = 'Testing…'
+  try {
+    const r = await api.testLlm()
+    keyNote.value = r.ok ? `Connected to ${r.model} (${r.latency_ms} ms).` : `Failed: ${r.error}`
+  } catch (e) {
+    keyNote.value = e.message
+  }
+}
 const egress = computed(() => config.value?.data_leaving_machine.join(' · ') || 'loading…')
 
 const onFileSelected = (e) => { selectedFile.value = e.target.files?.[0] || selectedFile.value }
@@ -323,4 +361,8 @@ onMounted(refreshConfig)
   font-size: 10px;
   color: #7E848A;
 }
+.mode-box { display: flex; flex-direction: column; gap: 10px; }
+.mode-title { font-size: 11px; font-weight: 600; }
+.key-note { font-size: 11px; }
+.mode-box .form-row { align-items: flex-end; margin-bottom: 0; }
 </style>

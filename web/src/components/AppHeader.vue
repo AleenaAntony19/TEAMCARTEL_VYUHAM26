@@ -66,10 +66,11 @@ import { useRouter } from 'vue-router'
 import { config, currentStepName, session } from '../store/session'
 import { wipeAll } from '../api/case'
 import ApiKeyModal from './ApiKeyModal.vue'
+import { ai } from '../api/index'
 
 const router = useRouter()
 const showKeyModal = ref(false)
-const llmLabel = computed(() => (config.value ? `LLM: ${config.value.llm.provider}` : ''))
+const llmLabel = computed(() => (ai.mode === 'ai' ? `AI: ${ai.provider}` : 'RULES ONLY'))
 
 const handleWipe = async () => {
   if (confirm('Delete every job, upload, sanitized output, reference hash and enrolment in this session, and forget any API key set here?')) {

@@ -8,7 +8,7 @@ import json
 import shutil
 from typing import Literal
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
@@ -55,29 +55,30 @@ def redact(body: RedactBody):
     return server.redact_job(body.job_id, RedactRequest(selections=body.selections, dry_run=body.dry_run))
 
 
-def _scout(body: ScoutBody, crawl: bool) -> dict:
+def _scout(body: ScoutBody, crawl: bool, request: Request) -> dict:
     req = DiscoveryRequest(org=body.org, domain=body.domain, entity_types=body.entity_types, crawl=crawl,
                            use_faces=body.use_faces, job_id=body.job_id, extra_urls=body.extra_urls)
-    return {"job_id": server.start_discovery(req)["id"]}
+    return {"job_id": server.start_discovery(req, request)["id"]}
 
 
 @router.post("/scout/search", status_code=202, tags=["scout"])
-def scout_search(body: ScoutBody):
+def scout_search(body: ScoutBody, request: Request):
     """Firewalled search-provider queries (org/domain + entity types only)."""
-    return _scout(body, crawl=False)
+    return _scout(body, False, request)
 
 
 @router.post("/scout/crawl", status_code=202, tags=["scout"])
-def scout_crawl(body: ScoutBody):
+def scout_crawl(body: ScoutBody, request: Request):
     """Search plus a polite registry crawl matched against reference PDQ hashes (and, opt-in, enrolled faces)."""
     if not len(server.REFERENCES) and not (body.use_faces and server.ENROLLED):
         raise HTTPException(409, "add a reference image (POST /api/references) or enrol (POST /api/v1/scout/enroll) first")
-    return _scout(body, crawl=True)
+    return _scout(body, True, request)
 
 
 @router.post("/scout/enroll", tags=["scout"])
 async def enroll(photo: UploadFile = File(...), selfie: UploadFile = File(...), consent: bool = Form(False)):
     """Consented likeness enrolment: one face in the photo, a live selfie that matches it. Keeps an int8 vector in memory only."""
+    server._not_in_public_demo()  # one server-wide list: a visitor's face must not be matched in a stranger's crawl
     from .. import face
 
     blobs = []
@@ -100,6 +101,7 @@ async def enroll(photo: UploadFile = File(...), selfie: UploadFile = File(...), 
 
 @router.delete("/scout/enroll", tags=["scout"])
 def unenroll():
+    server._not_in_public_demo()
     server.ENROLLED.clear()
     return {"enrolled": 0}
 
@@ -147,7 +149,7 @@ class SwarmRunBody(BaseModel):
     job_id: str
 
 
-def _swarm_job(j: "server.Job") -> None:
+def _swarm_job(j: "server.Job", cfg) -> None:
     """Binding agent swarm on an analysed job: MCP tools act on the job's own findings, graph and ledger."""
     import time as _t
 
@@ -173,7 +175,7 @@ def _swarm_job(j: "server.Job") -> None:
                             on_tool=on_tool, on_stage=lambda st, d: server._advance(j, st, d))
     t = _t.monotonic()
     try:
-        res = asyncio.run(run_agentic(sess.id, server.LLM_CFG, on_event))
+        res = asyncio.run(run_agentic(sess.id, cfg, on_event))
         out = sess.output
         if out and out.exists():
             final = j.workdir / "out" / f"input_sanitized{j.suffix}"
@@ -203,17 +205,18 @@ def _swarm_job(j: "server.Job") -> None:
 
 
 @router.post("/swarm/run", status_code=202, tags=["swarm"])
-def swarm_run(body: SwarmRunBody):
+def swarm_run(body: SwarmRunBody, request: Request):
     """Run the binding LLM agent swarm (planner, specialists, personas, FormatGuard, adjudicator, red team) on an analysed job."""
     j = server._get(body.job_id)
     if j.kind != "analysis" or j.status != "ready":
         raise HTTPException(409, "analysis must finish first")
-    if server.LOCAL_ONLY or server.LLM_CFG.provider == "none" or not server.LLM_CFG.api_key:
-        raise HTTPException(409, "configure Groq or Claude in the AI provider tab first")
+    cfg = server.request_llm(request)
+    if server.LOCAL_ONLY or cfg.provider == "none" or not cfg.api_key:
+        raise HTTPException(409, "choose Rules + AI and enter a Groq or Claude key first")
     if j.agent_run and j.agent_run["status"] == "running":
         raise HTTPException(409, "a swarm run is already in progress")
     j.agent_run = {"status": "running", "events": [], "result": None, "error": ""}
-    server.SWARM_POOL.submit(_swarm_job, j)
+    server.SWARM_POOL.submit(_swarm_job, j, cfg)
     return {"job_id": j.id, "status": "running"}
 
 

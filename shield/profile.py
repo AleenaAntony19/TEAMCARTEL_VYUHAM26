@@ -78,11 +78,8 @@ def layer_texts(path: Path) -> dict[str, str]:
         img = Image.open(path)
         exif = "\n".join(str(v) for v in img.getexif().values() if isinstance(v, (str, bytes)))
         exif += "\n" + "\n".join(str(v) for v in img.info.values() if isinstance(v, str))
-        try:
-            ocr = pytesseract.image_to_string(img, config="--psm 6")  # row-wise: keeps table rows (lat/long pairs) together
-        except Exception:
-            ocr = ""
-        return {"ocr": ocr, "exif": exif}
+        # no try: a failed OCR must fail the job, because "0 findings" would read as a clean file
+        return {"ocr": pytesseract.image_to_string(img, config="--psm 6"), "exif": exif}  # row-wise: keeps table rows (lat/long pairs) together
     return {"text": path.read_text(errors="ignore")}
 
 

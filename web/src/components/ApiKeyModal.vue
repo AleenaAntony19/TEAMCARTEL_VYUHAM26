@@ -12,7 +12,7 @@
       <div class="modal-body">
         <p class="desc mono">
           Public evaluation mode: Anyone can supply their own Groq or Anthropic Claude API key to run agent deliberations and natural language risk explanations.
-          Keys are kept in server memory only and are never saved to disk.
+          Your key stays in this browser tab and is sent only with your own requests.
         </p>
 
         <div class="field-group">
@@ -40,7 +40,7 @@
             type="password"
             autocomplete="off"
             v-model="form.key"
-            :placeholder="config?.llm?.key_set ? 'Key is currently active; enter new key to replace' : 'Paste API Key (sk-ant-... or gsk_...)'"
+            :placeholder="ai.key ? 'Key is set; enter a new key to replace it' : 'Paste API Key (sk-ant-... or gsk_...)'"
           />
         </div>
 
@@ -66,9 +66,7 @@
 
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
-import { config } from '../store/session'
-import { refreshConfig } from '../api/case'
-import { api } from '../api/index'
+import { ai, api } from '../api/index'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false }
@@ -96,10 +94,8 @@ watch(() => props.modelValue, (isOpen) => {
   if (isOpen) {
     statusMsg.value = ''
     isError.value = false
-    if (config.value?.llm?.provider && config.value.llm.provider !== 'none') {
-      form.provider = config.value.llm.provider
-      form.model = config.value.llm.model || ''
-    }
+    form.provider = ai.mode === 'ai' ? ai.provider : 'none'
+    form.model = ai.model
   }
 })
 
@@ -107,31 +103,19 @@ const close = () => {
   emit('update:modelValue', false)
 }
 
-const saveKey = async () => {
-  loading.value = true
-  statusMsg.value = 'Saving…'
+const apply = () => {
+  ai.mode = form.provider === 'none' ? 'rules' : 'ai'
+  if (form.provider !== 'none') ai.provider = form.provider
+  ai.key = form.provider === 'none' ? '' : form.key || ai.key
+  ai.model = form.model.trim()
+  form.key = ''
+}
+
+const saveKey = () => {
+  apply()
+  statusMsg.value = 'Saved for this tab.'
   isError.value = false
-  try {
-    await api.setLlm({
-      provider: form.provider,
-      model: form.model.trim(),
-      endpoint: '',
-      api_key: form.key,
-      timeout: 30,
-      retries: 2
-    })
-    form.key = ''
-    await refreshConfig()
-    statusMsg.value = 'Settings applied successfully!'
-    setTimeout(() => {
-      close()
-    }, 1200)
-  } catch (err) {
-    isError.value = true
-    statusMsg.value = `Error saving: ${err.message}`
-  } finally {
-    loading.value = false
-  }
+  setTimeout(close, 1000)
 }
 
 const testKey = async () => {
@@ -139,17 +123,7 @@ const testKey = async () => {
   statusMsg.value = 'Testing provider connection…'
   isError.value = false
   try {
-    if (form.key) {
-      await api.setLlm({
-        provider: form.provider,
-        model: form.model.trim(),
-        endpoint: '',
-        api_key: form.key,
-        timeout: 30,
-        retries: 2
-      })
-      await refreshConfig()
-    }
+    apply()
     const r = await api.testLlm()
     if (r.ok) {
       statusMsg.value = `Connected to ${r.model} (${r.latency_ms} ms latency)`
@@ -339,3 +313,4 @@ const testKey = async () => {
   background: #1d4ed8;
 }
 </style>
+

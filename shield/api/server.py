@@ -98,6 +98,7 @@ class Job:
     entities: dict[str, Entity] = field(default_factory=dict)  # finding id -> entity (never serialised)
     redaction: dict | None = None
     agent_run: dict | None = None  # binding LLM swarm run: status, events, result
+    redact_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)  # a redact rewrites out/: two at once corrupt each other
     summary: dict | None = None  # layers inspected and the document severity, for the case header
     discovery: dict | None = None
     error: str = ""
@@ -157,7 +158,8 @@ def _workdir() -> Path:
 
 def _drop(job: Job) -> None:
     job.cancel.set()
-    shutil.rmtree(job.workdir, ignore_errors=True)
+    with job.redact_lock:  # never delete files under a running redaction
+        shutil.rmtree(job.workdir, ignore_errors=True)
 
 
 def sweep() -> None:
@@ -452,7 +454,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[o for o in os.getenv("SHIELD_CORS_ORIGINS", "http://localhost:5173").split(",") if o],
     allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type", "X-Shield-LLM-Provider", "X-Shield-LLM-Key", "X-Shield-LLM-Model"],
 )
 
 
@@ -519,6 +521,8 @@ def config():
 
     provider = get_provider()
     egress = []
+    if not LOCAL_ONLY:
+        egress.append("If you choose AI with your own key: masked findings and search snippets go to that provider on your account")
     if LLM_CFG.provider != "none":
         egress.append(f"Discovery AI triage: masked search titles and snippets are sent to {LLM_CFG.provider}")
         egress.append(f"LLM explanations: finding type, rule, severity and masked evidence are sent to {LLM_CFG.endpoint}")
@@ -538,6 +542,7 @@ def config():
         "llm": LLM_CFG.public(),
         "data_leaving_machine": egress,
         "enrolled": len(ENROLLED),
+        "public_demo": is_public_demo(),
         "face_regions": FACE_REGIONS,
     }
 
@@ -589,6 +594,7 @@ def delete_job(job_id: str):
 @app.delete("/api/session")
 def clear_session():
     global LLM_CFG
+    _not_in_public_demo()
     with LOCK:
         jobs = list(JOBS.values())
         JOBS.clear()
@@ -617,6 +623,15 @@ def _selected(job: Job, req: RedactRequest) -> list[Entity]:
 @app.post("/api/jobs/{job_id}/redact")
 def redact_job(job_id: str, req: RedactRequest):
     job = _get(job_id)
+    if not job.redact_lock.acquire(blocking=False):
+        raise HTTPException(409, "a redaction of this file is already running")
+    try:
+        return _redact(job, req)
+    finally:
+        job.redact_lock.release()
+
+
+def _redact(job: Job, req: RedactRequest):
     if job.status != "ready" or job.kind != "analysis":
         raise HTTPException(409, f"job is {job.status}; analysis must finish first")
     if (job.agent_run or {}).get("status") == "running":
@@ -785,11 +800,10 @@ def _masked(text: str, blocked: list[str] = ()) -> str:
     return LONG_NUMBER.sub("•••", text)  # a wrong checksum or a mistyped phone is still a personal value
 
 
-def _discover(job: Job, req: DiscoveryRequest, blocked_values: list[str]) -> None:
+def _discover(job: Job, req: DiscoveryRequest, blocked_values: list[str], cfg: llm.LLMConfig) -> None:
     from .. import scout_agent
     from ..textscout import SearchError, build_queries, firewall, get_provider
 
-    cfg = LLM_CFG if not LOCAL_ONLY else llm.LLMConfig()
     from ..registry import load_registry
 
     predefined = sorted({r["domain"] for r in load_registry(REGISTRY) if not r["domain"].replace(".", "").isdigit()})  # IPs are the local demo
@@ -945,17 +959,40 @@ async def _crawl(job: Job, results: list[dict], use_faces: bool = False, extra_u
 
 
 @app.post("/api/discovery", status_code=202)
-def start_discovery(req: DiscoveryRequest):
+def start_discovery(req: DiscoveryRequest, request: Request):
+    cfg = request_llm(request)
     blocked: list[str] = []
     if req.job_id:
         # personal values are blocked; org/date context is what discovery is meant to search for
         blocked = [e.value for e in _get(req.job_id).entities.values() if e.value and e.type not in {"ORG", "DATE_TIME"}]
     job = Job(uuid.uuid4().hex, "discovery", time.time(), _workdir(), display_name=f"discovery: {req.org}")
-    _submit(job, lambda j: _discover(j, req, blocked))
+    _submit(job, lambda j: _discover(j, req, blocked, cfg))
     return {"id": job.id}
 
 
 # ---------- LLM provider ----------
+def _not_in_public_demo() -> None:
+    """Server-wide switches: on an open site a visitor could wipe everyone, or point the AI endpoint at their own host and collect the key."""
+    if is_public_demo():
+        raise HTTPException(403, "not available in public demo mode")
+
+
+def request_llm(request: Request) -> llm.LLMConfig:
+    """Who pays for this request's AI: the visitor's key, nobody (rules only), or the server's key.
+
+    A visitor's key lives for this request and the job it starts: never stored on the job, logged or returned.
+    """
+    provider, key = request.headers.get("x-shield-llm-provider", ""), request.headers.get("x-shield-llm-key", "")
+    if LOCAL_ONLY or provider == "none":
+        return llm.LLMConfig()
+    if not key:  # an open site must not let strangers spend the server's key
+        return llm.LLMConfig() if is_public_demo() else LLM_CFG
+    try:
+        return llm.configure(llm.LLMConfig(timeout=LLM_CFG.timeout), provider=provider, api_key=key, model=request.headers.get("x-shield-llm-model", ""))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+
+
 @app.get("/api/llm")
 def get_llm():
     return {**LLM_CFG.public(), "local_only": LOCAL_ONLY, "providers": list(llm.PROVIDERS)}
@@ -964,6 +1001,7 @@ def get_llm():
 @app.put("/api/llm")
 def set_llm(body: LLMSettings):
     global LLM_CFG
+    _not_in_public_demo()
     if LOCAL_ONLY and body.provider != "none":
         raise HTTPException(403, "local-only mode: remote LLM providers are disabled")
     try:
@@ -974,20 +1012,21 @@ def set_llm(body: LLMSettings):
 
 
 @app.post("/api/llm/test")
-def test_llm():
-    if LLM_CFG.provider == "none":
+def test_llm(request: Request):
+    cfg = request_llm(request)
+    if cfg.provider == "none":
         raise HTTPException(409, "no provider configured")
-    return llm.test_connection(LLM_CFG)
+    return llm.test_connection(cfg)
 
 
 @app.post("/api/llm/explain")
-def explain(req: ExplainRequest):
+def explain(req: ExplainRequest, request: Request):
     job = _get(req.job_id)
     f = next((f for f in job.findings if f["id"] == req.finding_id), None)
     if not f:
         raise HTTPException(404, "finding not found")
     try:
-        return llm.explain(LLM_CFG, {**f, "rule": f["type"]})
+        return llm.explain(request_llm(request), {**f, "rule": f["type"]})
     except llm.LLMError as exc:
         raise HTTPException(502, str(exc)) from None
 
@@ -1012,14 +1051,15 @@ def _refuse_unsafe_bind(host: str) -> None:
         loopback = ipaddress.ip_address(host).is_loopback
     except ValueError:
         loopback = host == "localhost"  # any other name, and "" (all interfaces), counts as public
-    if loopback or is_public_demo():
-        if is_public_demo() and not loopback:
-            logging.info("Running in public demo mode: authentication guard bypassed for open evaluation.")
+    if loopback:
+        return
+    if os.getenv("SHIELD_ALLOW_LOCAL") == "1":
+        raise SystemExit(f"Refusing to start: SHIELD_ALLOW_LOCAL=1 lets the crawler reach this machine, which is unsafe on SHIELD_HOST={host!r}. Unset it, or bind 127.0.0.1.")
+    if is_public_demo():
+        logging.info("Running in public demo mode: authentication guard bypassed for open evaluation.")
         return
     if len(API_TOKEN.strip()) < MIN_TOKEN_LENGTH:
         raise SystemExit(f"Refusing to start: SHIELD_HOST={host!r} is not loopback and SHIELD_API_TOKEN is empty. Set a token or bind 127.0.0.1.")
-    if os.getenv("SHIELD_ALLOW_LOCAL") == "1":
-        raise SystemExit(f"Refusing to start: SHIELD_ALLOW_LOCAL=1 lets the crawler reach this machine, which is unsafe on SHIELD_HOST={host!r}. Unset it or bind 127.0.0.1.")
 
 
 def main() -> None:

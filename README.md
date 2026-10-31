@@ -100,8 +100,9 @@ One Docker container: the [Dockerfile](Dockerfile) builds the web UI, installs t
 
 | Variable | Needed | Purpose |
 |---|---|---|
-| `SHIELD_API_TOKEN` | yes | Protects `/api` and `/mcp`. Generate it with `openssl rand -hex 32`. |
-| `ANTHROPIC_API_KEY` | optional | AI features (`SHIELD_LLM_PROVIDER=anthropic`) |
+| `SHIELD_PUBLIC_DEMO` | one of these two | `1` opens the site with no token. Visitors bring their own AI key, and server-wide switches are closed. |
+| `SHIELD_API_TOKEN` | one of these two | Team mode: protects `/api` and `/mcp`. Generate it with `openssl rand -hex 32`. |
+| `ANTHROPIC_API_KEY` | optional | Server key for team mode. Public demo mode never uses it. |
 | `SERPER_API_KEY` | optional | Live discovery search |
 | `PORT` | set by the host | Listen port, 8000 if unset. `SHIELD_PORT` wins if both are set. |
 

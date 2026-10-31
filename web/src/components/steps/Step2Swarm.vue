@@ -68,23 +68,23 @@
           <span class="step-badge mono">CONFIG</span>
           <span class="step-title">AI PROVIDER</span>
         </div>
-        <span class="step-status-tag mono" :class="llmReady ? 'completed' : 'pending'">{{ llmReady ? llm.provider + ' / ' + llm.model : 'NOT CONNECTED' }}</span>
+        <span class="step-status-tag mono" :class="llmReady ? 'completed' : 'pending'">{{ !llmReady ? 'RULES ONLY' : ai.key ? ai.provider + ' / your key' : 'server key' }}</span>
       </div>
       <div class="card-content">
         <p v-if="config.value?.local_only" class="err-line mono">Local-only mode is on: remote AI is disabled.</p>
         <div class="form-row">
           <label class="mono">PROVIDER
             <select class="field mono" v-model="form.provider">
-              <option value="none">None</option>
-              <option value="groq">Groq</option>
+              <option value="none">None (rules only)</option>
               <option value="anthropic">Anthropic Claude</option>
+              <option value="groq">Groq</option>
             </select>
           </label>
           <label class="mono grow">MODEL (EMPTY = DEFAULT)
             <input class="field mono" v-model="form.model" :placeholder="llm?.model || ''" />
           </label>
-          <label class="mono grow">API KEY (kept in server memory only)
-            <input class="field mono" type="password" autocomplete="off" v-model="form.key" :placeholder="llm?.key_set ? 'key set; leave empty to keep it' : 'paste key'" />
+          <label class="mono grow">YOUR API KEY (kept in this tab only)
+            <input class="field mono" type="password" autocomplete="off" v-model.trim="form.key" :placeholder="ai.key ? 'key set; leave empty to keep it' : llm?.key_set ? 'optional: this server has a key' : 'paste key'" />
           </label>
         </div>
         <div class="next-action-row">
@@ -174,27 +174,24 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { config, session } from '../../store/session'
 import { refreshConfig, runSwarm } from '../../api/case'
-import { api } from '../../api/index'
+import { ai, api } from '../../api/index'
 
 const emit = defineEmits(['next-step'])
 const form = reactive({ provider: 'none', model: '', key: '' })
 const providerNote = ref('')
 
 const llm = computed(() => config.value?.llm)
-const llmReady = computed(() => !!llm.value && llm.value.provider !== 'none' && llm.value.key_set)
+const llmReady = computed(() => ai.mode === 'ai' && (!!ai.key || !!llm.value?.key_set))
 const canRun = computed(() => session.job?.status === 'ready' && llmReady.value && !session.swarmRunning)
 const activeAgentCount = computed(() => session.agents.filter((a) => a.state === 'active').length)
 
-const saveProvider = async () => {
-  try {
-    await api.setLlm({ provider: form.provider, model: form.model.trim(), endpoint: '', api_key: form.key, timeout: 30, retries: 2 })
-    form.key = ''
-    form.model = ''
-    await refreshConfig()
-    providerNote.value = 'Saved.'
-  } catch (e) {
-    providerNote.value = e.message
-  }
+const saveProvider = () => {
+  ai.mode = form.provider === 'none' ? 'rules' : 'ai'
+  if (form.provider !== 'none') ai.provider = form.provider
+  ai.key = form.provider === 'none' ? '' : form.key || ai.key
+  ai.model = form.model.trim()
+  form.key = ''
+  providerNote.value = 'Saved for this tab.'
 }
 
 const testProvider = async () => {
@@ -209,7 +206,7 @@ const testProvider = async () => {
 
 onMounted(async () => {
   await refreshConfig()
-  form.provider = llm.value?.provider || 'none'
+  form.provider = ai.mode === 'ai' ? ai.provider : 'none'
 })
 </script>
 

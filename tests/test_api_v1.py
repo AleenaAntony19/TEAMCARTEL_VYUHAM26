@@ -495,3 +495,50 @@ def test_id_printed_on_an_image_inside_a_pdf_is_found_and_removed(client):
     pix = page.get_pixmap(dpi=200)
     rendered = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
     assert "2345" not in pytesseract.image_to_string(rendered) and "ABCPK" not in pytesseract.image_to_string(rendered)
+
+
+def test_visitor_key_is_per_request_never_stored_and_rules_only_means_no_ai(client, monkeypatch):
+    seen = []
+
+    def fake(cfg, *a, **k):
+        seen.append(cfg)
+        return {"ok": True, "model": cfg.model, "latency_ms": 1}
+
+    monkeypatch.setattr(server.llm, "test_connection", fake)
+    monkeypatch.setattr(server, "LLM_CFG", server.llm.configure(server.llm.LLMConfig(), provider="groq", api_key="server-key"))
+    head = {"X-Shield-LLM-Provider": "anthropic", "X-Shield-LLM-Key": "visitor-key"}
+    assert client.post("/api/llm/test", headers=head).status_code == 200
+    assert seen[-1].api_key == "visitor-key" and seen[-1].provider == "anthropic"
+    assert server.LLM_CFG.api_key == "server-key", "a visitor key must not replace the server's"
+    assert "visitor-key" not in client.get("/api/config").text
+    assert client.post("/api/llm/test", headers={"X-Shield-LLM-Provider": "none"}).status_code == 409
+    client.post("/api/llm/test")
+    assert seen[-1].api_key == "server-key"
+    assert client.post("/api/llm/test", headers={"X-Shield-LLM-Provider": "evil", "X-Shield-LLM-Key": "k"}).status_code == 422
+    j = _ready_job(client)
+    assert client.post("/api/v1/swarm/run", json={"job_id": j["id"]}, headers={"X-Shield-LLM-Provider": "none"}).status_code == 409
+
+
+def test_two_redactions_of_one_job_cannot_run_together(client):
+    j = _ready_job(client)
+    job = server._get(j["id"])
+    sel = [{"finding_id": f["id"], "action": f["actions"][0]} for f in j["findings"]]
+    assert job.redact_lock.acquire(blocking=False)
+    try:
+        r = client.post(f"/api/jobs/{j['id']}/redact", json={"selections": sel})
+        assert r.status_code == 409 and "already running" in r.json()["detail"]
+    finally:
+        job.redact_lock.release()
+    assert client.post(f"/api/jobs/{j['id']}/redact", json={"selections": sel}).status_code == 200
+
+
+def test_a_broken_image_fails_rather_than_reporting_nothing_found(client):
+    r = client.post("/api/jobs", files={"file": ("x.jpg", b"\xff\xd8\xff\xe0" + b"\x00" * 64, "image/jpeg")})
+    if r.status_code != 202:
+        return  # refused at upload is just as honest
+    for _ in range(200):
+        j = client.get(f"/api/jobs/{r.json()['id']}").json()
+        if j["status"] not in ("queued", "running"):
+            break
+        time.sleep(0.02)
+    assert j["status"] == "failed"

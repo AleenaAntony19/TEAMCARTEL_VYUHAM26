@@ -137,7 +137,7 @@ def discover(monkeypatch, org, domain="", snippet="list", reply=None, title="", 
     with TestClient(app):
         job = server.Job("t", "discovery", 0, server._workdir())
         job.discovery = None
-        server._discover(job, server.DiscoveryRequest(org=org, domain=domain), [])
+        server._discover(job, server.DiscoveryRequest(org=org, domain=domain), [], server.LLM_CFG)
     server.clear_session()
     return searched, prompts, job.discovery
 
