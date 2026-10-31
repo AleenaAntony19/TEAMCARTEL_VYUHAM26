@@ -319,11 +319,19 @@ app.include_router(router)
 
 # MCP over Streamable HTTP at /mcp (same tools as `python -m shield.mcp` stdio); guarded by SHIELD_API_TOKEN like /api
 from contextlib import asynccontextmanager  # noqa: E402
+from mcp.server.transport_security import TransportSecuritySettings  # noqa: E402
+from starlette.responses import RedirectResponse  # noqa: E402
 
 from ..mcp.tools import server as mcp_server  # noqa: E402
 
 def _mcp_app():
-    return mcp_server.streamable_http_app(streamable_http_path="/", stateless_http=True, json_response=True)
+    sec = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    return mcp_server.streamable_http_app(streamable_http_path="/", stateless_http=True, json_response=True, transport_security=sec)
+
+
+@app.get("/mcp")
+def _mcp_slash_redirect(request: Request):
+    return RedirectResponse(url="/mcp/", status_code=307)
 
 
 app.mount("/mcp", _mcp_app())
