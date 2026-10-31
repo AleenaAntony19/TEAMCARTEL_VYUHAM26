@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -27,6 +28,8 @@ def _blur_thumb(img_bgr: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
+cv2.setNumThreads(1)  # a small host has far fewer CPUs than cv2 sees: extra threads starve the website
+_HASHER = ThreadPoolExecutor(1, thread_name_prefix="hash")  # fetches stay parallel, CPU work takes turns
 MAX_PDF_PAGES, MAX_PDF_IMAGES, MAX_PDF_IMAGE_PIXELS = 50, 40, 40_000_000
 
 
@@ -76,7 +79,7 @@ class Matcher:
         if res.blocked_reason or not res.body:
             self.failed += 1  # counted, so "no match" can never hide "could not check"
             return None
-        return await asyncio.to_thread(self._match, ref, res)  # hashing must not stall the other site agents
+        return await asyncio.get_running_loop().run_in_executor(_HASHER, self._match, ref, res)
 
     def _match(self, ref, res) -> Match | None:
         if res.body[:5] != b"%PDF-":
@@ -94,7 +97,7 @@ class Matcher:
             del data, arr, img
             return None
 
-        vecs = face.vectors(img)
+        vecs = face.vectors(img) if self.enrolled else []  # slow, and only an enrolment uses it
         boxes = [b for _, b in vecs]
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         regions = pdq.pdq_regions(rgb, boxes)
