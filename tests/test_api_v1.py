@@ -460,3 +460,38 @@ def test_a_failed_image_is_counted_and_a_rate_limit_is_retried(monkeypatch):
     m = Matcher([], None)
     assert asyncio.run(m.on_image(ImageRef("p", "i", "d"), F())) is None
     assert len(calls) == 2 and m.failed == 1
+
+
+def test_id_printed_on_an_image_inside_a_pdf_is_found_and_removed(client):
+    import pymupdf
+    import pytesseract
+    from PIL import Image, ImageDraw, ImageFont
+
+    card = Image.new("RGB", (900, 300), "white")
+    d = ImageDraw.Draw(card)
+    font = ImageFont.load_default(size=40)
+    d.text((30, 60), "Aadhaar: 2345 6789 0124", fill="black", font=font)
+    d.text((30, 160), "PAN: ABCPK1234F", fill="black", font=font)
+    buf = io.BytesIO()
+    card.save(buf, "PNG")
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((60, 60), "Attached scan below.")
+    page.insert_image(pymupdf.Rect(60, 90, 540, 250), stream=buf.getvalue())
+    r = client.post("/api/jobs", files={"file": ("scan.pdf", doc.tobytes(), "application/pdf")})
+    for _ in range(300):
+        j = client.get(f"/api/jobs/{r.json()['id']}").json()
+        if j["status"] not in ("queued", "running"):
+            break
+        time.sleep(0.03)
+    hit = next((f for f in j["findings"] if f["type"] == "SENSITIVE_IMAGE"), None)
+    if hit is None and "2345" not in pytesseract.image_to_string(card):
+        pytest.skip("tesseract cannot read the test font here")
+    assert hit["severity"] == "critical" and "IN_AADHAAR" in hit["masked"] and j["summary"]["severity"] == "CRITICAL"
+    assert "2345 6789" not in json.dumps(j)
+    client.post(f"/api/jobs/{j['id']}/redact", json={"selections": [{"finding_id": hit["id"], "action": "remove"}]})
+    out = client.get(f"/api/jobs/{j['id']}/download").content
+    page = pymupdf.open(stream=out, filetype="pdf")[0]
+    pix = page.get_pixmap(dpi=200)
+    rendered = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    assert "2345" not in pytesseract.image_to_string(rendered) and "ABCPK" not in pytesseract.image_to_string(rendered)

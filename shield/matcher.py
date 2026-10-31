@@ -5,6 +5,7 @@ import hashlib
 from datetime import datetime, timezone
 
 import cv2
+import pymupdf
 import numpy as np
 from PIL import Image
 
@@ -23,6 +24,19 @@ def _blur_thumb(img_bgr: np.ndarray) -> bytes:
     buf = io.BytesIO()
     blurred.save(buf, "JPEG", quality=85)
     return buf.getvalue()
+
+
+MAX_PDF_PAGES, MAX_PDF_IMAGES, MAX_PDF_IMAGE_PIXELS = 50, 40, 40_000_000
+
+
+def _pdf_images(data: bytes) -> list[bytes]:
+    """Embedded images of an untrusted PDF, bounded. A damaged file yields none; it is not a crash."""
+    try:
+        with pymupdf.open(stream=data, filetype="pdf") as doc:
+            xrefs = {i[0]: i for p in doc.pages(0, min(len(doc), MAX_PDF_PAGES)) for i in p.get_images(full=True)}
+            return [doc.extract_image(x)["image"] for x, i in list(xrefs.items())[:MAX_PDF_IMAGES] if i[2] * i[3] <= MAX_PDF_IMAGE_PIXELS]
+    except Exception:
+        return []
 
 
 class Matcher:
@@ -49,7 +63,12 @@ class Matcher:
         return await asyncio.to_thread(self._match, ref, res)  # hashing must not stall the other site agents
 
     def _match(self, ref, res) -> Match | None:
-        data = res.body
+        if res.body[:5] != b"%PDF-":
+            return self._match_one(ref.page_url, ref.image_url, res.body, res)
+        hits = [self._match_one(ref.page_url, f"{ref.image_url}#image{i}", blob, res) for i, blob in enumerate(_pdf_images(res.body))]
+        return next((m for m in hits if m), None)  # shortcut: a PDF reports its first match only; list them all if reviewers need that
+
+    def _match_one(self, page_url: str, image_url: str, data: bytes, res) -> Match | None:
         arr = np.frombuffer(data, np.uint8)
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if img is None:
@@ -82,8 +101,8 @@ class Matcher:
             kind = "face" if sim is not None and (d is None or sim >= face.THRESHOLD) else "pdq"
             m = Match(
                 id=sha[:16],
-                page_url=ref.page_url,
-                image_url=ref.image_url,
+                page_url=page_url,
+                image_url=image_url,
                 kind=kind,
                 pdq_distance=d,
                 similarity=sim,

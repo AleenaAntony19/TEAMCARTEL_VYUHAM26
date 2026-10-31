@@ -1,0 +1,12 @@
+# Public pages standing in for flagged sites in the demo: start the API with SHIELD_REGISTRY=registry/presentation.yaml.
+# follow: 0 scans only these pages. Replace with the sites you are allowed to monitor.
+- {domain: en.wikipedia.org, category: image_host, tier: 1, enabled: true, follow: 0, entry_urls: ["https://en.wikipedia.org/wiki/Ada_Lovelace", "https://en.wikipedia.org/wiki/Charles_Babbage", "https://en.wikipedia.org/wiki/Alan_Turing"]}
+- {domain: fr.wikipedia.org, category: image_host, tier: 1, enabled: true, follow: 0, entry_urls: ["https://fr.wikipedia.org/wiki/Ada_Lovelace"]}
+- {domain: de.wikipedia.org, category: image_host, tier: 1, enabled: true, follow: 0, entry_urls: ["https://de.wikipedia.org/wiki/Ada_Lovelace"]}
+- {domain: es.wikipedia.org, category: image_host, tier: 1, enabled: true, follow: 0, entry_urls: ["https://es.wikipedia.org/wiki/Ada_Lovelace"]}
+- {domain: it.wikipedia.org, category: image_host, tier: 1, enabled: true, follow: 0, entry_urls: ["https://it.wikipedia.org/wiki/Ada_Lovelace"]}
+- {domain: www.wikidata.org, category: image_host, tier: 2, enabled: true, follow: 0, entry_urls: ["https://www.wikidata.org/wiki/Q7259"]}
+- {domain: www.gutenberg.org, category: image_host, tier: 2, enabled: true, follow: 0, entry_urls: ["https://www.gutenberg.org/ebooks/1342"]}
+- {domain: www.archives.gov, category: image_host, tier: 2, enabled: true, follow: 0, entry_urls: ["https://www.archives.gov/founding-docs/declaration"]}
+- {domain: science.nasa.gov, category: image_host, tier: 2, enabled: true, follow: 0, entry_urls: ["https://science.nasa.gov/people/"]}
+- {domain: raw.githubusercontent.com, category: image_host, tier: 1, enabled: true, follow: 0, entry_urls: ["https://raw.githubusercontent.com/AleenaAntony19/TEAMCARTEL_VYUHAM26/main/demo/presentation/leaked_dump.pdf"]}

@@ -281,3 +281,78 @@ def test_a_document_value_is_masked_in_web_text_even_with_no_label():
 
     assert "Ravi Kumar" not in _masked("Staff list: Ravi Kumar, sales", ["Ravi Kumar"])
     assert "Acme Corp" in _masked("Acme Corp annual report")
+
+
+def test_a_pdf_on_a_site_is_matched_by_its_embedded_images(tmp_path):
+    import asyncio
+
+    import cv2
+    import numpy as np
+    import pymupdf
+
+    from shield import pdq
+    from shield.matcher import Matcher
+    from shield.models import ImageRef
+
+    rng = np.random.default_rng(3)
+    img = cv2.resize(rng.integers(0, 255, (40, 40, 3), dtype=np.uint8), (400, 400), interpolation=cv2.INTER_CUBIC)
+    bank = pdq.HashBank()
+    bank.add_reference("r", "r", cv2.cvtColor(img, cv2.COLOR_BGR2RGB), [])
+    assert len(bank), "fixture must hash"
+    png = cv2.imencode(".png", img)[1].tobytes()
+    doc = pymupdf.open()
+    doc.new_page().insert_image(pymupdf.Rect(50, 50, 450, 450), stream=png)
+    pdf = doc.tobytes()
+
+    class Res:
+        blocked_reason, headers = None, {}
+
+        def __init__(self, body):
+            self.body = body
+
+    class F:
+        def __init__(self, body):
+            self.body = body
+
+        async def get(self, url):
+            return Res(self.body)
+
+    ref = ImageRef("https://x/page", "https://x/a.pdf", "x")
+    m = asyncio.run(Matcher([], bank).on_image(ref, F(pdf)))
+    assert m and m.image_url == "https://x/a.pdf#image0" and m.pdq_distance <= 31
+    assert asyncio.run(Matcher([], bank).on_image(ref, F(b"%PDF-1.7 broken"))) is None
+    assert asyncio.run(Matcher([], pdq.HashBank()).on_image(ref, F(pdf))) is None
+
+
+def test_links_to_pdfs_are_collected_and_a_url_that_is_a_pdf_goes_to_the_matcher():
+    import asyncio
+
+    from bs4 import BeautifulSoup
+
+    from shield.crawl import Job, Scheduler, _image_urls
+
+    assert _image_urls(BeautifulSoup('<a href="/d/x.pdf?v=1">x</a>', "html.parser"), "https://w.org/") == {"https://w.org/d/x.pdf?v=1"}
+
+    class Res:
+        blocked_reason, status, headers = None, 200, {}
+        body = b"%PDF-1.7 x"
+
+    class F:
+        async def get(self, url):
+            return Res()
+
+    seen = []
+
+    async def on_image(ref):
+        seen.append(ref.image_url)
+
+    async def on_event(ev):
+        pass
+
+    async def go():
+        s = Scheduler()
+        s.push(1, 0.5, Job("https://w.org/a.pdf", "page", 0, "w.org"))
+        return await s.run(F(), on_image, on_event, timeout=5)
+
+    counters = asyncio.run(go())
+    assert seen == ["https://w.org/a.pdf"] and counters["pages"] == 0 and counters["images"] == 1

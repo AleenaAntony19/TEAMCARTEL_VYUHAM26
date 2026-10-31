@@ -238,25 +238,41 @@ def _evidence(text: str, start: int, end: int, spans: list[tuple[int, int]]) -> 
     return " ".join("".join(chars).split())
 
 
-def _face_entities(src: Path) -> list[tuple[Entity, str]]:
-    """Face *regions* only (YuNet detection, no recognition), so photos can be removed."""
+NOT_PERSONAL = {"ORG", "LOCATION", "DATE_TIME"}
+CRITICAL_IN_IMAGE = {"IN_AADHAAR", "CREDIT_CARD", "IN_BANK_ACCOUNT", "API_KEY"}
+
+
+def _types_in_image(img) -> list[str]:
+    """Sensitive data printed inside an embedded image, by type only: a scanned ID has no text layer for the detectors."""
+    import pytesseract
+    from PIL import Image
+
+    text = pytesseract.image_to_string(Image.fromarray(img[:, :, ::-1]), config="--psm 6")
+    found = detect(text, "ocr") + _extra_entities({"ocr": text}, [])
+    return sorted({e.type for e in found if e.type not in NOT_PERSONAL})
+
+
+def _face_entities(src: Path) -> list[tuple[Entity, str, list[str]]]:
+    """Embedded images to remove: face *regions* (YuNet detection, no recognition) and images with sensitive text."""
     from .. import face
     from ..profile import extract_images
 
     out = []
+    plain_image = src.suffix.lower() in {".png", ".jpg", ".jpeg"}  # these already went through OCR as their own layer
     for name, img, bbox in extract_images(src):
         rows = face.detect_faces(img)
-        if not len(rows):
+        kinds = [] if plain_image else _types_in_image(img)
+        if not len(rows) and not kinds:
             continue
         if src.suffix.lower() == ".pdf" and bbox:
-            x0, y0, x1, y1, pno = bbox  # remove the whole placed photo: pixel->page scaling is not tracked
-            out.append((Entity("FACE", "", 0, 0, 0.9, f"bbox:{x0},{y0},{x1},{y1}@{pno}"), f"page {pno + 1}, photo {name}"))
-        elif src.suffix.lower() in {".png", ".jpg", ".jpeg"}:
+            x0, y0, x1, y1, pno = bbox  # remove the whole placed image: pixel->page scaling is not tracked
+            out.append((Entity("FACE", "", 0, 0, 0.9, f"bbox:{x0},{y0},{x1},{y1}@{pno}"), f"page {pno + 1}, image {name}", kinds))
+        elif plain_image:
             for r in rows:
                 x, y, w, h = (int(v) for v in r[:4])
-                out.append((Entity("FACE", "", 0, 0, float(r[-1]), f"bbox:{x},{y},{x + w},{y + h}"), f"pixels {x},{y} {w}x{h}"))
+                out.append((Entity("FACE", "", 0, 0, float(r[-1]), f"bbox:{x},{y},{x + w},{y + h}"), f"pixels {x},{y} {w}x{h}", []))
         else:
-            out.append((Entity("FACE", "", 0, 0, 0.9, "media"), f"embedded image {name}"))
+            out.append((Entity("FACE", "", 0, 0, 0.9, "media"), f"embedded image {name}", kinds))
     return out
 
 
@@ -312,7 +328,7 @@ def _analyse(job: Job, src: Path) -> None:
     for m in audit.potential_misses:
         spans.setdefault(m.layer, []).append((m.start, m.end))
 
-    faces: list[tuple[Entity, str]] = []
+    faces: list[tuple[Entity, str, list[str]]] = []
     if FACE_REGIONS and src.suffix.lower() != ".txt":
         try:
             faces = _run_stage(job, "face_regions", lambda: _face_entities(src))
@@ -352,18 +368,21 @@ def _analyse(job: Job, src: Path) -> None:
             "actions": FILE_ACTIONS.get(job.suffix, ["token", "mask", "remove"]) if m.layer in {"visible", "ocr"} else ["token", "mask", "remove"],
         })
         ents[fid] = Entity("POTENTIAL_LEAK", m.token, m.start, m.end, 0.6, m.layer)
-    for e, where in faces:
+    for e, where, kinds in faces:
         fid = hashlib.sha256(salt + e.layer.encode()).hexdigest()[:12]
         supported = e.layer.startswith("bbox:")
+        critical = bool(CRITICAL_IN_IMAGE.intersection(kinds))
         findings.append({
-            "id": fid, "type": "FACE", "severity": "high", "confidence": round(e.score, 2), "layer": "image",
+            "id": fid, "type": "SENSITIVE_IMAGE" if kinds else "FACE", "severity": "critical" if critical else "high", "confidence": round(e.score, 2), "layer": "image",
             "location": {"layer": "image", "where": where, "bbox": e.layer.split(":", 1)[1] if supported else None},
-            "masked": "", "evidence": f"face region detected ({where}); no identification performed",
-            "analyzer": "yunet:face_detection", "checks": [],
-            "recommendation": RECOMMEND["FACE"] if supported else "Face redaction is not supported for this format; remove the image manually.",
+            "masked": ", ".join(kinds), "evidence": f"{', '.join(kinds)} readable inside an image ({where})" if kinds else f"face region detected ({where}); no identification performed",
+            "analyzer": "ocr:embedded_image" if kinds else "yunet:face_detection", "checks": [],
+            "recommendation": RECOMMEND["FACE"] if supported else "Automatic removal is not supported for this format; remove the image manually.",
             "actions": ["remove"] if supported else [],
         })
         ents[fid] = e
+        if kinds:  # the score above only saw the text layer
+            job.summary["severity"], job.summary["score"] = ("CRITICAL", max(job.summary["score"], 85)) if critical else (job.summary["severity"] if job.summary["score"] >= 70 else "HIGH", max(job.summary["score"], 70))
     findings.sort(key=lambda f: (ORDER.get(f["severity"], 9), f["layer"], f["location"].get("start", 0)))
     job.findings, job.entities = findings, ents
     counts: dict[str, int] = {}

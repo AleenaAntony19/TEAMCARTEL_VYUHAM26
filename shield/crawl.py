@@ -64,7 +64,7 @@ def _image_urls(soup: BeautifulSoup, base: str) -> set[str]:
             out.add(_abs(base, value))
     for a in soup.select("a[href]"):
         href = _abs(base, a["href"])
-        if re.search(r"\.(jpg|jpeg|png|webp|gif|bmp)(\?|$)", href, re.I) and "/wiki/File:" not in href:  # that is a page, not an image
+        if re.search(r"\.(jpg|jpeg|png|webp|gif|bmp|pdf)(\?|$)", href, re.I) and "/wiki/File:" not in href:  # that is a page, not an image
             out.add(href)
     return {u for u in out if not re.search(r"\.svg(\?|$)", u, re.I)}  # vector icons cannot be hashed
 
@@ -159,6 +159,12 @@ class Scheduler:
                 self._done.set()
             return
 
+        if res.body[:5] == b"%PDF-":  # a page URL that is really a PDF: its embedded images go to the matcher
+            self.push(job.tier, job.risk, replace(job, kind="image", page_url=job.url))
+            self.pending -= 1
+            if self.pending <= 0:
+                self._done.set()
+            return
         self.counters["pages"] += 1
         stats["pages"] += 1
         await on_event({"kind": "crawl_progress", **self.counters, "url": job.url, "site": job.site})

@@ -31,6 +31,8 @@ Development UI with hot reload: `cd web && npm run dev` (http://localhost:5173, 
 
 Run every check: `bash scripts/validate.sh`.
 
+Images inside documents: an uploaded PDF or Office file has each embedded image checked for faces and read with OCR, and a PDF linked from a crawled page has its images matched against your references.
+
 **Scope:** text search covers the open web through the search provider. Image matching runs on predefined sites, pages you add and AI leads, because hashing every image online needs far more compute than one server has. One code agent per site runs in parallel with no AI tokens. PDQ hashes are compact, so the matcher can scale out with more compute, but that scale has not been load tested.
 
 Add your predefined sites to [registry/seeds.yaml](registry/seeds.yaml) (or point `SHIELD_REGISTRY` at your own file). A row with `follow: 0` scans only its listed pages. The registry ships with the local demo sites only. To try image matching, run `python demo/serve.py` and start the API with `SHIELD_ALLOW_LOCAL=1`; for real use, replace the seeds with sites you may crawl.
@@ -102,6 +104,8 @@ One Docker container: the [Dockerfile](Dockerfile) builds the web UI, installs t
 | `ANTHROPIC_API_KEY` | optional | AI features (`SHIELD_LLM_PROVIDER=anthropic`) |
 | `SERPER_API_KEY` | optional | Live discovery search |
 | `PORT` | set by the host | Listen port, 8000 if unset. `SHIELD_PORT` wins if both are set. |
+
+To use Vercel for the web app only, set the project root to `web`, put your Render URL in [web/vercel.json](web/vercel.json), and deploy. The API still runs on Render.
 
 Render, using [render.yaml](render.yaml):
 
