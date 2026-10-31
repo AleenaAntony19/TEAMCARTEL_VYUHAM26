@@ -13,7 +13,7 @@ from .textscout import firewall
 
 MAX_ROUNDS = 2
 MAX_HITS = 20  # results per call
-MAX_LEADS = 10  # pages handed to the image matcher
+MAX_LEADS = 5  # pages handed to the image matcher: each one adds minutes of rate-limited image fetches
 MAX_NEXT = 2
 TITLE, SNIPPET = 60, 80
 

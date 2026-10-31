@@ -53,7 +53,7 @@
           </button>
         </div>
         <p v-if="!session.job" class="err-line mono">The swarm needs a document. Start a case from the home screen.</p>
-        <p v-else-if="!llmReady" class="err-line mono">Connect an AI provider below first.</p>
+        <p v-else-if="!llmReady && !config.value?.local_only" class="err-line mono">Connect an AI provider below first.</p>
         <p v-if="session.swarmError" class="err-line mono">{{ session.swarmError }}</p>
         <p v-if="session.swarmResult" class="step-desc mono">
           {{ session.swarmResult.clean ? 'CLEAN' : 'NOT CLEAN' }} · {{ session.swarmResult.llm_calls }} LLM calls · {{ session.swarmResult.tool_calls }} tool calls · {{ session.swarmResult.cycles }} cycle(s)

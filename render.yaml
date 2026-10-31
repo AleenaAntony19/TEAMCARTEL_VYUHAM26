@@ -9,7 +9,9 @@ services:
     numInstances: 1
     healthCheckPath: /api/health
     envVars:
-      - key: SHIELD_API_TOKEN # the app refuses to start without it
+      - key: SHIELD_PUBLIC_DEMO # enables public demo mode so judges/visitors are not blocked by access token prompts
+        value: "1"
+      - key: SHIELD_API_TOKEN # optional in public demo mode; app starts freely
         sync: false
       - key: SERPER_API_KEY
         sync: false

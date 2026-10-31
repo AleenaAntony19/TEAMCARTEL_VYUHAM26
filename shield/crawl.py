@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import time
+from collections.abc import KeysView
 from dataclasses import dataclass, replace
 from urllib.parse import urljoin, urlparse
 
@@ -13,6 +14,7 @@ from .models import ImageRef
 
 
 MIN_IMAGE_WIDTH = 64  # the matcher ignores anything smaller
+MAX_IMAGES_PER_PAGE = 30  # shortcut: a long article's later images go unchecked and are counted, raise it with more compute
 RETRYABLE = {"http_403", "http_429"}
 RETRY_WAIT = 5.0
 IMAGE_RPS = 3.0  # images were unpaced: real sites answer a burst with 403, and the match is then silently lost
@@ -53,8 +55,8 @@ def _abs(base: str, href: str) -> str:
     return urljoin(base, href)
 
 
-def _image_urls(soup: BeautifulSoup, base: str) -> set[str]:
-    out: set[str] = set()
+def _image_urls(soup: BeautifulSoup, base: str) -> KeysView[str]:
+    out: dict[str, None] = {}  # keeps page order: the main image comes early, and the per-page cap must not cut it
     for tag in soup.select("img"):
         if str(tag.get("width", "")).isdigit() and int(tag["width"]) < MIN_IMAGE_WIDTH:
             continue  # icons and flags: never a match, and each one costs a rate-limited fetch
@@ -64,12 +66,12 @@ def _image_urls(soup: BeautifulSoup, base: str) -> set[str]:
                 continue
             if attr == "srcset":
                 value = value.split(",")[0].strip().split(" ")[0]
-            out.add(_abs(base, value))
+            out[_abs(base, value)] = None
     for a in soup.select("a[href]"):
         href = _abs(base, a["href"])
-        if re.search(r"\.(jpg|jpeg|png|webp|gif|bmp|pdf)(\?|$)", href, re.I) and "/wiki/File:" not in href:  # that is a page, not an image
-            out.add(href)
-    return {u for u in out if not re.search(r"\.svg(\?|$)", u, re.I)}  # vector icons cannot be hashed
+        if re.search(r"\.(jpg|jpeg|png|webp|gif|bmp|pdf)(\?|$)", href, re.I) and not re.search(r"/wiki/[^/]+:", href):  # a wiki file page in any language, not an image
+            out[href] = None
+    return {u: None for u in out if not re.search(r"\.svg(\?|$)", u, re.I)}.keys()  # vector icons cannot be hashed
 
 
 class Scheduler:
@@ -194,7 +196,10 @@ class Scheduler:
                 if urlparse(href).netloc == urlparse(job.url).netloc:
                     next_urls.append(href)
 
-        for ref in sorted(refs):
+        if kind == "default" and len(refs) > MAX_IMAGES_PER_PAGE:
+            self.counters["images_skipped"] = self.counters.get("images_skipped", 0) + len(refs) - MAX_IMAGES_PER_PAGE
+            refs = list(refs)[:MAX_IMAGES_PER_PAGE]
+        for ref in refs if kind == "default" else sorted(refs):
             self.push(job.tier, job.risk, Job(ref, "image", job.depth, domain, job.url, job.seed_category, site=job.site))
 
         if job.depth < self.max_depth:

@@ -4,11 +4,13 @@ async function call(path, init = {}, retry = true) {
   if (typeof init.body === 'string') headers.set('Content-Type', 'application/json')
   const res = await fetch(path, { ...init, headers })
   if (res.status === 401 && retry) {
-    const token = window.prompt('This server needs its access token:')
+    // Only prompt once if the server explicitly requires a private token
+    const token = window.prompt('Server requires access token (leave empty if in public demo mode):')
     if (token) {
-      await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: json({ token }) })
-      return call(path, init, false)
+      const authRes = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: json({ token }) })
+      if (authRes.ok) return call(path, init, false)
     }
+    return {}
   }
   if (!res.ok) {
     let detail = res.statusText

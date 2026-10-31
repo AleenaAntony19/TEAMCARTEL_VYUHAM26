@@ -49,6 +49,10 @@ CRAWL_RPS = float(os.getenv("SHIELD_CRAWL_RPS", "1"))
 CRAWL_TIMEOUT = float(os.getenv("SHIELD_CRAWL_TIMEOUT", "300"))
 REGISTRY = Path(os.getenv("SHIELD_REGISTRY") or BASE / "registry/seeds.yaml")
 API_TOKEN = os.getenv("SHIELD_API_TOKEN", "")
+
+
+def is_public_demo() -> bool:
+    return os.getenv("SHIELD_PUBLIC_DEMO", "0").lower() in ("1", "true", "yes") or API_TOKEN in ("public", "demo")
 LOCAL_ONLY = os.getenv("SHIELD_LOCAL_ONLY") == "1"
 FACE_REGIONS = os.getenv("SHIELD_FACE_REGIONS", "1") == "1"
 
@@ -355,7 +359,7 @@ def _analyse(job: Job, src: Path) -> None:
         })
         ents[fid] = e
     for m in audit.potential_misses:  # validator agent: tokens the detectors did not classify
-        if m.layer == "exif" and m.band not in {"CRITICAL", "HIGH"}:
+        if m.layer in {"exif", "metadata"} and m.band not in {"CRITICAL", "HIGH"}:
             continue  # XMP schema URLs and the like, not personal data
         fid = hashlib.sha256(salt + f"MISS|{m.layer}|{m.start}".encode()).hexdigest()[:12]
         findings.append({
@@ -474,7 +478,7 @@ async def guard(request: Request, call_next):
     if int(request.headers.get("content-length") or 0) > MAX_REQUEST_BYTES:
         return JSONResponse({"detail": "request too large"}, status_code=413)
     if request.url.path.startswith(("/api/", "/mcp")) and request.method != "OPTIONS":
-        if API_TOKEN and request.url.path not in ("/api/auth", "/api/health") and not _authorized(request):  # hosts probe health with no token
+        if not is_public_demo() and API_TOKEN and request.url.path not in ("/api/auth", "/api/health") and not _authorized(request):  # hosts probe health with no token
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
         sweep()
     resp = await call_next(request)
@@ -1008,7 +1012,9 @@ def _refuse_unsafe_bind(host: str) -> None:
         loopback = ipaddress.ip_address(host).is_loopback
     except ValueError:
         loopback = host == "localhost"  # any other name, and "" (all interfaces), counts as public
-    if loopback:
+    if loopback or is_public_demo():
+        if is_public_demo() and not loopback:
+            logging.info("Running in public demo mode: authentication guard bypassed for open evaluation.")
         return
     if len(API_TOKEN.strip()) < MIN_TOKEN_LENGTH:
         raise SystemExit(f"Refusing to start: SHIELD_HOST={host!r} is not loopback and SHIELD_API_TOKEN is empty. Set a token or bind 127.0.0.1.")

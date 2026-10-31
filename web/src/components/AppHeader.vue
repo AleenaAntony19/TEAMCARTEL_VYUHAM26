@@ -5,8 +5,11 @@
         <span class="brand-icon">🛡️</span>
         <span class="brand-text">SHIELD·SCOUT</span>
       </div>
-      <span class="brand-tag">{{ llmLabel }}</span>
+      <span class="brand-tag clickable" @click="showKeyModal = true" title="Configure AI Provider & Keys">
+        {{ llmLabel || 'CONFIGURE AI' }} ⚙️
+      </span>
     </div>
+    <ApiKeyModal v-model="showKeyModal" />
 
     <div class="header-center">
       <div class="view-switcher" role="group" aria-label="Layout view switcher">
@@ -58,12 +61,14 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { config, currentStepName, session } from '../store/session'
 import { wipeAll } from '../api/case'
+import ApiKeyModal from './ApiKeyModal.vue'
 
 const router = useRouter()
+const showKeyModal = ref(false)
 const llmLabel = computed(() => (config.value ? `LLM: ${config.value.llm.provider}` : ''))
 
 const handleWipe = async () => {
@@ -122,12 +127,25 @@ const handleWipe = async () => {
 .brand-tag {
   font-family: var(--font-mono);
   font-size: 10px;
-  padding: 2px 6px;
+  padding: 3px 8px;
   background: var(--fascia);
   color: var(--blue);
   border: 1px solid var(--line);
   font-weight: 600;
   letter-spacing: 0.5px;
+  border-radius: 2px;
+}
+
+.brand-tag.clickable {
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s ease;
+}
+
+.brand-tag.clickable:hover {
+  background: var(--surface);
+  border-color: var(--blue);
+  box-shadow: 0 0 6px rgba(59, 130, 246, 0.3);
 }
 
 .header-center {

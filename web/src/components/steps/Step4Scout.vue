@@ -212,7 +212,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { session } from '../../store/session'
+import { config, session } from '../../store/session'
 import { runScout } from '../../api/case'
 import { api } from '../../api/index'
 
@@ -238,6 +238,7 @@ const crawlGap = computed(() => {
   if (!c) return ''
   const gaps = []
   if (c.images_failed) gaps.push(`${c.images_failed} image(s) could not be fetched`)
+  if (c.images_skipped) gaps.push(`${c.images_skipped} image(s) past the per-page limit were skipped`)
   if (c.blocked) gaps.push(`${c.blocked} page(s) were blocked`)
   if (c.robots_denied) gaps.push(`${c.robots_denied} page(s) disallowed by robots.txt`)
   if (c.timed_out || c.stopped === 'timeout') gaps.push('the crawl hit its time limit')
@@ -249,7 +250,7 @@ const allBlocked = computed(() => session.queries.length > 0 && session.queries.
 const aiLine = computed(() => {
   const ai = session.discovery?.ai
   if (!ai) return ''
-  return ai.used ? `AI read ${ai.read} results in ${ai.calls} call(s), ${ai.tokens} tokens, ${ai.leads} lead(s)` : 'AI triage off: connect a provider in Step 2'
+  return ai.used ? `AI read ${ai.read} results in ${ai.calls} call(s), ${ai.tokens} tokens, ${ai.leads} lead(s)` : config.value?.local_only ? 'AI triage off: local-only mode' : 'AI triage off: connect a provider in Step 2, or the subject was blocked'
 })
 const start = () => runScout({ org: form.org.trim(), domain: form.domain.trim().toLowerCase(), entity_types: form.types, crawl: form.crawl, extra_urls: form.crawl ? form.urls.split('\n').map((u) => u.trim()).filter(Boolean) : [] })
 
