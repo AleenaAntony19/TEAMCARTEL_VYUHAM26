@@ -27,6 +27,6 @@ COPY --from=deps /build/models models/
 COPY --from=web /web/dist web/dist/
 RUN useradd --uid 10001 --create-home shield
 USER shield
-# main() refuses this bind unless SHIELD_API_TOKEN is set. The port comes from PORT (default 8000).
+# main() refuses this bind unless SHIELD_API_TOKEN or SHIELD_PUBLIC_DEMO is set. The port comes from PORT (default 8000).
 ENV SHIELD_HOST=0.0.0.0
 CMD ["python", "-m", "shield.api"]

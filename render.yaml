@@ -5,7 +5,7 @@ services:
     name: shield-scout
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter # free plans sleep when idle, and sleeping is a restart
+    plan: standard # needs about 2 GB: tested peak 1.4 GB with a large image. Free plans also sleep, and sleeping is a restart
     numInstances: 1
     healthCheckPath: /api/health
     envVars:
