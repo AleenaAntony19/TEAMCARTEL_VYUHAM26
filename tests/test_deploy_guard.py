@@ -128,3 +128,15 @@ def test_public_demo_does_not_excuse_the_local_crawl_flag(monkeypatch):
     monkeypatch.setenv("SHIELD_ALLOW_LOCAL", "1")
     with pytest.raises(SystemExit, match="SHIELD_ALLOW_LOCAL"):
         server._refuse_unsafe_bind("0.0.0.0")
+
+
+def test_public_demo_does_not_open_mcp(monkeypatch):
+    monkeypatch.setenv("SHIELD_PUBLIC_DEMO", "1")
+    with TestClient(server.app) as c:  # the context starts MCP's session manager
+        assert c.post("/mcp/", json={}).status_code == 401, "no token set: MCP stays closed"
+        assert c.get("/api/config").status_code == 200, "the website stays open"
+        monkeypatch.setattr(server, "API_TOKEN", "demo")
+        assert c.post("/mcp/", json={}, headers={"Authorization": "Bearer demo"}).status_code == 401, "a guessable token is not enough"
+        monkeypatch.setattr(server, "API_TOKEN", "t" * 32)
+        assert c.post("/mcp/", json={}).status_code == 401
+        assert c.post("/mcp/", json={}, headers={"Authorization": "Bearer " + "t" * 32}).status_code != 401

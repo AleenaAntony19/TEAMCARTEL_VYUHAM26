@@ -479,6 +479,9 @@ async def guard(request: Request, call_next):
         return JSONResponse({"detail": "Content-Length required"}, status_code=411)
     if int(request.headers.get("content-length") or 0) > MAX_REQUEST_BYTES:
         return JSONResponse({"detail": "request too large"}, status_code=413)
+    # public demo opens the website, not MCP: its tools open server files and run agents
+    if request.url.path.startswith("/mcp") and is_public_demo() and not (len(API_TOKEN) >= MIN_TOKEN_LENGTH and _authorized(request)):
+        return JSONResponse({"detail": "MCP needs a SHIELD_API_TOKEN of 32+ characters, even in public demo mode"}, status_code=401)
     if request.url.path.startswith(("/api/", "/mcp")) and request.method != "OPTIONS":
         if not is_public_demo() and API_TOKEN and request.url.path not in ("/api/auth", "/api/health") and not _authorized(request):  # hosts probe health with no token
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
