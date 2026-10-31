@@ -182,8 +182,8 @@ def test_llm_errors_fail_safe_never_skip_verification(tmp_path, monkeypatch):
     sid = open_document(str(doc))["session_id"]
     down = httpx.MockTransport(lambda r: httpx.Response(503))
     res = asyncio.run(run_agentic(sid, GROQ, transport=down))
-    # nothing could be challenged, so the redact-everything plan is binding, not a fallback
-    assert res["fail_safe_defaults"] == 0 and res["clean"] and res["attacks"]  # every finding redacted, attack still ran
+    # no agent answered, so the plan is a fallback and must say so: nobody contested is not the same as nobody replied
+    assert res["fail_safe_defaults"] == 1 and res["clean"] and res["attacks"]  # every finding redacted, attack still ran
     assert all(d["action"] != "keep" for d in res["decisions"])
     assert "ravi.kumar@acme.in" not in open(res["output"]).read()
 
