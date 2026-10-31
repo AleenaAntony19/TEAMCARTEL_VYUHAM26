@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import json
 from pathlib import Path
 
@@ -26,6 +27,7 @@ def _require_models():
         )
 
 
+_MODEL_LOCK = threading.Lock()  # one shared OpenCV net: two threads with different image sizes segfault the process
 _DETECTOR: cv2.FaceDetectorYN | None = None
 _RECOGNIZER: cv2.FaceRecognizerSF | None = None
 
@@ -50,9 +52,10 @@ def detect_faces(img_bgr: np.ndarray) -> np.ndarray:
     if img_bgr is None or img_bgr.size == 0:
         return np.empty((0, 15), dtype=np.float32)
     h, w = img_bgr.shape[:2]
-    det = _detector()
-    det.setInputSize((w, h))
-    _, faces = det.detect(img_bgr)
+    with _MODEL_LOCK:
+        det = _detector()
+        det.setInputSize((w, h))
+        _, faces = det.detect(img_bgr)
     if faces is None:
         return np.empty((0, 15), dtype=np.float32)
     faces = np.asarray(faces, dtype=np.float32)
@@ -62,9 +65,10 @@ def detect_faces(img_bgr: np.ndarray) -> np.ndarray:
 
 
 def embed(img_bgr: np.ndarray, face_row: np.ndarray) -> FaceVec:
-    rec = _recognizer()
-    aligned = rec.alignCrop(img_bgr, face_row.astype(np.float32))
-    feat = rec.feature(aligned).flatten().astype(np.float32)
+    with _MODEL_LOCK:
+        rec = _recognizer()
+        aligned = rec.alignCrop(img_bgr, face_row.astype(np.float32))
+        feat = rec.feature(aligned).flatten().astype(np.float32)
     norm = float(np.linalg.norm(feat)) + 1e-9
     feat = feat / norm
     q = np.round(feat * 127.0).clip(-127, 127).astype(np.int8)

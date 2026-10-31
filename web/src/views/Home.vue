@@ -34,6 +34,11 @@
             </div>
           </div>
 
+          <label class="mono url-box">OR PASTE TEXT
+            <textarea class="field mono" rows="4" v-model="pastedText"></textarea>
+          </label>
+          <p v-if="selectedFile && hasText" class="drop-secondary">Both given: the file is used and the pasted text is ignored.</p>
+
           <div class="consent-box">
             <label class="consent-checkbox-label">
               <input type="checkbox" v-model="consentAffirmed" />
@@ -70,11 +75,13 @@ const router = useRouter()
 const fileInputRef = ref(null)
 const isDragOver = ref(false)
 const selectedFile = ref(null)
+const pastedText = ref('')
 const consentAffirmed = ref(false)
 const starting = ref(false)
 const error = ref('')
 
-const canStart = computed(() => selectedFile.value && consentAffirmed.value)
+const hasText = computed(() => pastedText.value.trim().length > 0)
+const canStart = computed(() => (selectedFile.value || hasText.value) && consentAffirmed.value)
 const modeLabel = computed(() => {
   const c = config.value
   if (!c) return 'CONNECTING…'
@@ -92,7 +99,7 @@ const startNewCase = async () => {
   starting.value = true
   error.value = ''
   try {
-    router.push(`/case/${await createCase(selectedFile.value)}`)
+    router.push(`/case/${await createCase(selectedFile.value, pastedText.value)}`)
   } catch (e) {
     error.value = e.message
   } finally {
@@ -151,15 +158,17 @@ onMounted(refreshConfig)
 
 .home-main {
   flex: 1;
+  min-height: 0;
   display: flex;
-  align-items: center;
   justify-content: center;
   padding: 24px;
+  overflow-y: auto;
 }
 
 .intake-card {
   width: 100%;
   max-width: 680px;
+  margin: auto; /* centres, but unlike align-items keeps the top reachable on short screens */
   background: var(--panel);
   border: 1px solid var(--ink);
   display: flex;

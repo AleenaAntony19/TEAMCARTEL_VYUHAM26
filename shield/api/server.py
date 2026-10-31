@@ -455,7 +455,7 @@ async def guard(request: Request, call_next):
     if int(request.headers.get("content-length") or 0) > MAX_REQUEST_BYTES:
         return JSONResponse({"detail": "request too large"}, status_code=413)
     if request.url.path.startswith(("/api/", "/mcp")) and request.method != "OPTIONS":
-        if API_TOKEN and request.url.path != "/api/auth" and not _authorized(request):
+        if API_TOKEN and request.url.path not in ("/api/auth", "/api/health") and not _authorized(request):  # hosts probe health with no token
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
         sweep()
     resp = await call_next(request)
@@ -497,10 +497,11 @@ def config():
     provider = get_provider()
     egress = []
     if LLM_CFG.provider != "none":
+        egress.append(f"Discovery AI triage: masked search titles and snippets are sent to {LLM_CFG.provider}")
         egress.append(f"LLM explanations: finding type, rule, severity and masked evidence are sent to {LLM_CFG.endpoint}")
     if provider.name != "offline":
         egress.append(f"Discovery search: firewall-approved query strings are sent to {provider.name}")
-    egress.append("Discovery crawl (only when requested): HTTP GET requests to registry domains")
+    egress.append("Discovery crawl (only when requested): HTTP GET requests to registry domains, pages you add, and AI leads")
     if not LOCAL_ONLY:
         egress.append("Confirming an image match: its hostname is looked up at rdap.org")
     return {
@@ -744,17 +745,32 @@ def _scout_event(job: "Job", ev: dict) -> None:
         evs.append({"ts": time.time(), **ev})
 
 
-def _masked(text: str) -> str:
-    for e in detect(text):
-        text = text.replace(e.value, mask_value(e.value))
-    return text
+def _on_site(url: str, domain: str) -> bool:
+    host = urlparse(url).hostname or ""
+    return host == domain or host.endswith("." + domain)
+
+
+def _masked(text: str, blocked: list[str] = ()) -> str:
+    """Web text before it is shown or sent to a model. Org and place names stay: the firewall allows them, and triage needs them."""
+    from ..detect import variants
+    from ..textscout import LONG_NUMBER
+
+    found = {e.value for e in detect(text) + detect(text.upper()) + labelled_ids(text) if e.type not in {"ORG", "LOCATION", "DATE_TIME"}}
+    found |= {v for b in blocked for v in variants(b) if v}  # the document's own values, such as a plain name no detector labels
+    for value in sorted(found, key=len, reverse=True):
+        text = re.sub(re.escape(value), mask_value(value), text, flags=re.I)
+    return LONG_NUMBER.sub("•••", text)  # a wrong checksum or a mistyped phone is still a personal value
 
 
 def _discover(job: Job, req: DiscoveryRequest, blocked_values: list[str]) -> None:
+    from .. import scout_agent
     from ..textscout import SearchError, build_queries, firewall, get_provider
 
     cfg = LLM_CFG if not LOCAL_ONLY else llm.LLMConfig()
-    queries = _run_stage(job, "build_queries", lambda: build_queries(req.org, req.entity_types, req.domain, cfg, blocked_values))
+    from ..registry import load_registry
+
+    predefined = sorted({r["domain"] for r in load_registry(REGISTRY) if not r["domain"].replace(".", "").isdigit()})  # IPs are the local demo
+    queries = _run_stage(job, "build_queries", lambda: build_queries(req.org, req.entity_types, req.domain, predefined))
     checked = _run_stage(job, "privacy_firewall", lambda: [{"query": q, "allowed": firewall(q, blocked_values)} for q in queries])
     provider = get_provider()
     results: list[dict] = []
@@ -762,12 +778,22 @@ def _discover(job: Job, req: DiscoveryRequest, blocked_values: list[str]) -> Non
     for c in checked:
         _scout_event(job, {"kind": "query", "query": c["query"], "allowed": c["allowed"], "provider": provider.name})
 
-    def run_search():
-        for q in [c["query"] for c in checked if c["allowed"]]:
+    def run_search(todo: list[str]):
+        def fetch(q):
+            try:
+                return q, [] if job.cancel.is_set() else provider.search(q), None
+            except Exception as exc:
+                return q, [], exc
+
+        # searches are I/O: ten in parallel take the time of one. Brave has no retry here, so it stays serial.
+        with ThreadPoolExecutor(max_workers=1 if provider.name == "brave" else 8) as pool:
+            answers = list(pool.map(fetch, todo))
+        for q, hits, failure in answers:
             if job.cancel.is_set():
                 raise Cancelled()
             try:
-                hits = provider.search(q)
+                if failure:
+                    raise failure
             except SearchError as exc:
                 job.stages[-1].detail = str(exc)
                 _scout_event(job, {"kind": "search_error", "provider": provider.name, "reason": str(exc)})
@@ -784,14 +810,55 @@ def _discover(job: Job, req: DiscoveryRequest, blocked_values: list[str]) -> Non
                 if not h.get("url"):
                     continue
                 results.append({
-                    "source_url": h["url"], "title": _masked(h.get("title", ""))[:200], "excerpt": _masked(h.get("snippet", ""))[:300],
+                    "source_url": h["url"], "title": _masked(h.get("title", ""), blocked_values)[:200], "excerpt": _masked(h.get("snippet", ""), blocked_values)[:300],
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "match_type": "text_search",
                     "score": None, "evidence_status": "candidate: needs human review", "query": q,
                     "provider": h.get("provider", provider.name), "tier": h.get("tier"),
                 })
                 _scout_event(job, {"kind": "search_hit", "url": h.get("url", ""), "provider": provider.name, "query": q})
 
-    _run_stage(job, f"search:{provider.name}", run_search)
+    leads: list[str] = []
+
+    def run_agent():
+        """Search, let the model pick from what is new, repeat once on its sharper queries. No new results, no call."""
+        todo, read = [c["query"] for c in checked if c["allowed"]], 0
+        subject_ok = firewall(f"{req.org} {req.domain}", blocked_values)  # the subject itself goes to the model
+        ai = job.discovery["ai"] = {"used": cfg.provider != "none" and bool(cfg.api_key) and subject_ok, "calls": 0, "tokens": 0, "read": 0, "leads": 0}
+        for rounds_left in range(scout_agent.MAX_ROUNDS - 1, -1, -1):
+            run_search(todo)
+            fresh = [r for r in results[read:] if r["match_type"] == "text_search" and r.get("provider") != "offline"]
+            read = len(results)
+            listed = [r for r in fresh if any(_on_site(r["source_url"], d) for d in predefined)]
+            for r in listed:  # a hit on a predefined site is a lead by definition: no model needed
+                r["ai_why"] = "on a predefined site"
+                leads.append(r["source_url"])
+                _scout_event(job, {"kind": "ai_lead", "url": r["source_url"], "why": r["ai_why"]})
+            fresh = [r for r in fresh if r not in listed]
+            ai["leads"] = len(leads)
+            if not ai["used"] or not fresh:
+                return
+            try:
+                out = scout_agent.triage(cfg, req.org, fresh, blocked_values)
+            except llm.LLMError as exc:
+                _scout_event(job, {"kind": "search_error", "provider": cfg.provider, "reason": f"AI triage skipped: {exc}"})
+                return
+            ai["calls"] += 1 if out["tokens"] else 0
+            ai["tokens"] += out["tokens"]
+            ai["read"] += min(len(fresh), scout_agent.MAX_HITS) if out["tokens"] else 0
+            for p in out["picks"]:
+                next(r for r in results if r["source_url"] == p["source_url"])["ai_why"] = p["why"] or "picked by AI"
+                leads.append(p["source_url"])
+                _scout_event(job, {"kind": "ai_lead", "url": p["source_url"], "why": p["why"]})
+            ai["leads"] = len(leads)
+            _scout_event(job, {"kind": "ai_triage", "read": min(len(fresh), scout_agent.MAX_HITS), "picked": len(out["picks"]), "tokens": out["tokens"]})
+            todo = out["next"] if rounds_left else []  # a query shown here must really run
+            for q in todo:
+                job.discovery["queries"].append({"query": q, "allowed": True})
+                _scout_event(job, {"kind": "query", "query": q, "allowed": True, "provider": provider.name})
+            if not todo:
+                return
+
+    _run_stage(job, f"search:{provider.name}", run_agent)
     job.ledger.append("scout", "SEARCH", {"provider": provider.name, "queries": len(checked),
                                           "blocked": sum(not c["allowed"] for c in checked), "results": len(results)})
 
@@ -802,7 +869,7 @@ def _discover(job: Job, req: DiscoveryRequest, blocked_values: list[str]) -> Non
     if not len(REFERENCES) and not faces:
         job.stages.append(Stage("crawl", "skipped", "no reference images or face enrolment"))
         return
-    _run_stage(job, "crawl+match", lambda: asyncio.run(_crawl(job, results, faces, req.extra_urls)))
+    _run_stage(job, "crawl+match", lambda: asyncio.run(_crawl(job, results, faces, req.extra_urls + leads[:scout_agent.MAX_LEADS])))
     job.ledger.append("scout", "CRAWL", {k: v for k, v in (job.discovery["crawl"] or {}).items()})
 
 
@@ -815,10 +882,11 @@ async def _crawl(job: Job, results: list[dict], use_faces: bool = False, extra_u
     fetcher = Fetcher()
     # face vectors only when the user enrolled with consent + selfie and asked for it
     matcher = Matcher(list(ENROLLED) if use_faces else [], REFERENCES)
-    sched = Scheduler(rps_per_domain=CRAWL_RPS, global_concurrency=4, budget_pages=CRAWL_MAX_PAGES, max_depth=CRAWL_MAX_DEPTH)
+    sched = Scheduler(rps_per_domain=CRAWL_RPS, global_concurrency=8, budget_pages=CRAWL_MAX_PAGES, max_depth=CRAWL_MAX_DEPTH)
     for row in load_registry(REGISTRY):
         for url in row.get("entry_urls", []):
-            sched.push(row.get("tier", 2), 0.5, CrawlJob(url, "page", 0, row["domain"], seed_category=row["category"]))
+            depth = CRAWL_MAX_DEPTH - row.get("follow", CRAWL_MAX_DEPTH)  # follow: 0 scans only the listed pages
+            sched.push(row.get("tier", 2), 0.5, CrawlJob(url, "page", depth, row["domain"], seed_category=row["category"], site=f'{row["category"]}@{row["domain"]}'))
     for url in extra_urls:  # depth at the limit: scan this page, follow nothing
         sched.push(1, 0.5, CrawlJob(url, "page", CRAWL_MAX_DEPTH, urlparse(url).hostname or ""))
 
@@ -910,12 +978,33 @@ def mount_web() -> None:
         app.mount("/", StaticFiles(directory=WEB_DIST, html=True), name="web")
 
 
+MIN_TOKEN_LENGTH = 32  # /api/auth has no rate limit, so length is the defence: use `openssl rand -hex 32`
+
+
+def _refuse_unsafe_bind(host: str) -> None:
+    """People upload private documents, so a server others can reach must never start unprotected."""
+    import ipaddress
+
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host == "localhost"  # any other name, and "" (all interfaces), counts as public
+    if loopback:
+        return
+    if len(API_TOKEN.strip()) < MIN_TOKEN_LENGTH:
+        raise SystemExit(f"Refusing to start: SHIELD_HOST={host!r} is not loopback and SHIELD_API_TOKEN is empty. Set a token or bind 127.0.0.1.")
+    if os.getenv("SHIELD_ALLOW_LOCAL") == "1":
+        raise SystemExit(f"Refusing to start: SHIELD_ALLOW_LOCAL=1 lets the crawler reach this machine, which is unsafe on SHIELD_HOST={host!r}. Unset it or bind 127.0.0.1.")
+
+
 def main() -> None:
     import uvicorn
 
+    host = os.getenv("SHIELD_HOST", "127.0.0.1")
+    _refuse_unsafe_bind(host)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)  # its INFO line prints request URLs, and Google CSE keeps the key in the URL
-    uvicorn.run(app, host=os.getenv("SHIELD_HOST", "127.0.0.1"), port=int(os.getenv("SHIELD_PORT", "8000")))
+    uvicorn.run(app, host=host, port=int(os.getenv("SHIELD_PORT") or os.getenv("PORT") or "8000"))  # hosts like Render inject PORT
 
 
 if __name__ == "__main__":

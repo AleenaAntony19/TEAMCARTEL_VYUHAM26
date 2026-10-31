@@ -224,7 +224,8 @@ def execute_destructive_redaction(session_id: str, decisions: list[dict], strate
         s.on_stage("object_redact", {"selected": len(ents), "strategy": strategy, "floor_enforced": len(enforced)})
     out = redact(s.src, ents, s.workdir / "out", aggressive=strategy == "aggressive")
     s.output, s.cycles = out, s.cycles + 1
-    s.redacted_ids = [fid for fid, a in chosen.items() if a != "keep"]
+    # a union: a narrower replan must not shrink what the red team attacks, or a value could survive and still pass
+    s.redacted_ids = sorted(set(s.redacted_ids) | {fid for fid, a in chosen.items() if a != "keep"})
     return _audit(s, "execute_destructive_redaction", {"decisions": len(chosen), "strategy": strategy},
                   {"redacted": len(ents), "kept": sum(a == "keep" for a in chosen.values()), "floor_enforced": enforced,
                    "strategy": strategy, "cycle": s.cycles, "output_sha256": hashlib.sha256(out.read_bytes()).hexdigest()})

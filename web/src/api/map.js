@@ -178,6 +178,19 @@ export function applyScoutEvent(s, ev) {
     addLog(s, `[Search] failed: ${ev.reason}`, 'warn', when)
     return
   }
+  if (ev.kind === 'ai_triage') {
+    addLog(s, `[AI triage] read ${ev.read}, picked ${ev.picked}, ${ev.tokens} tokens`, 'info', when)
+    return
+  }
+  if (ev.kind === 'site_agent') {
+    const agents = (s.siteAgents = s.siteAgents || {})
+    agents[ev.site] = ev.status
+    const id = `siteagent_${ev.site}`
+    ensureNode(s, id, ev.site, 'Agent', 'Code agent for one site. Runs in parallel with the others and spends no AI tokens.', { status: ev.status, pages: ev.pages ?? 0, images: ev.images ?? 0 })
+    ensureEdge(s, hub, id, 'SPAWNED')
+    addLog(s, `[Site agent] ${ev.site} ${ev.status}${ev.status === 'done' ? `: ${ev.pages ?? 0} page(s), ${ev.images ?? 0} image(s)` : ''}`, 'info', when)
+    return
+  }
   if (!ev.url) return
   const site = `site_${area(ev.url)}`
   ensureNode(s, site, area(ev.url), 'Site', 'Seen during this scout run')
@@ -185,8 +198,13 @@ export function applyScoutEvent(s, ev) {
     ensureEdge(s, hub, site, 'FOUND')
     return
   }
+  if (ev.kind === 'ai_lead') {
+    ensureEdge(s, hub, site, 'LEAD')
+    addLog(s, `[AI lead] ${ev.url}${ev.why ? ` (${ev.why})` : ''}`, 'info', when)
+    return
+  }
   const refused = ev.kind === 'blocked' || ev.kind === 'robots_denied'
-  ensureEdge(s, hub, site, refused ? 'BLOCKED' : 'SCRAPES', 'scrape') // web scraping is always the red flowing edge
+  ensureEdge(s, ev.site ? `siteagent_${ev.site}` : hub, site, refused ? 'BLOCKED' : 'SCRAPES', 'scrape') // web scraping is always the red flowing edge
   if (ev.kind === 'crawl_progress') {
     s.counters.pages = ev.pages ?? s.counters.pages + 1
     s.counters.images = ev.images ?? s.counters.images
@@ -217,9 +235,10 @@ export function applyScoutEvent(s, ev) {
 /** Final discovery results split into the two lists the UI shows. */
 export function applyDiscovery(s, discovery) {
   s.discovery = discovery
-  s.textHits = discovery.results.filter((r) => r.match_type === 'text_search')
+  s.textHits = discovery.results.filter((r) => r.match_type === 'text_search').sort((a, b) => Boolean(b.ai_why) - Boolean(a.ai_why))
   s.matches = discovery.results.filter((r) => r.match_type !== 'text_search')
   s.counters.matches = s.matches.length
+  if (discovery.crawl) Object.assign(s.counters, { pages: discovery.crawl.pages, images: discovery.crawl.images }) // events stop at the last page, images run later
 }
 
 /** Report sections built only from what this case really produced. */
@@ -240,7 +259,9 @@ export function buildReport(s) {
   }
   if (s.discovery) {
     const rev = s.matches.map((m) => `- ${m.review || 'unreviewed'}: ${m.source_url}`).join('\n') || '- none'
-    sections.push({ title: 'Leak scout', content: `Provider: ${s.discovery.provider}\nQueries: ${s.queries.length}\nText results (candidates): ${s.textHits.length}\nPages crawled: ${s.counters.pages}\n\nImage matches:\n${rev}` })
+    const ai = s.discovery.ai
+    const aiLines = ai?.used ? `\nAI read: ${ai.read}\nAI leads: ${ai.leads}\nAI tokens: ${ai.tokens}` : ''
+    sections.push({ title: 'Leak scout', content: `Provider: ${s.discovery.provider}\nQueries: ${s.queries.length}\nText results (candidates): ${s.textHits.length}\nPages crawled: ${s.counters.pages}${aiLines}\n\nImage matches:\n${rev}` })
   }
   return sections
 }

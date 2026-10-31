@@ -33,6 +33,7 @@ const q = encodeURIComponent
 export const api = {
   config: () => call('/api/config'),
   submitFile: (file) => form('/api/jobs', { file }),
+  submitText: (text) => form('/api/jobs', { text }),
   job: (id) => call(`/api/jobs/${id}`),
   redact: (id, selections) => post(`/api/jobs/${id}/redact`, { selections }),
   downloadUrl: (id) => `/api/jobs/${id}/download`,

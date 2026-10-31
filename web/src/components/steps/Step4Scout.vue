@@ -13,6 +13,9 @@
 
       <div class="card-content">
         <div class="honest-limits-line mono">⚠️ NOTICE: Leads for human review, not proof.</div>
+        <p class="step-desc">
+          <strong>Text</strong> search covers the open web through the search provider. <strong>Images</strong> are checked only on your predefined sites, pages you add, and AI leads: hashing every image online needs far more compute than one server has. The PDQ matcher uses compact hashes, so it can scale out with more compute; that scale is not tested here.
+        </p>
 
         <div class="form-row">
           <label class="mono grow">ORGANISATION
@@ -27,6 +30,7 @@
         </div>
         <div class="check-row mono">
           <label><input type="checkbox" v-model="form.crawl" /> ALSO CRAWL REGISTRY SITES (needs a reference image or enrolment below)</label>
+          <span class="rule-hint">AI leads (first 10) are also checked by the image matcher when crawl is on.</span>
         </div>
         <label v-if="form.crawl" class="mono url-box">EXTRA PAGES TO SCAN FOR YOUR IMAGE (ONE URL PER LINE, MAX 20; ROBOTS.TXT APPLIES, LINKS ARE NOT FOLLOWED)
           <textarea class="field mono" rows="4" v-model="form.urls" placeholder="https://example.com/page"></textarea>
@@ -52,6 +56,8 @@
             <span class="c-label mono">BLOCKED TARGETS</span>
           </div>
         </div>
+
+        <p v-if="agentTotal" class="step-desc mono">SITE AGENTS: {{ agentTotal }} spawned, {{ agentsRunning }} running (one per site, in parallel, no AI tokens)</p>
 
         <div class="firewall-monitor">
           <div class="monitor-header mono">
@@ -89,6 +95,8 @@
           </table>
         </div>
 
+        <div v-if="aiLine" class="honest-limits-line mono">{{ aiLine }}</div>
+
         <div v-if="session.textHits.length" class="text-hits-box">
           <div class="section-title mono">{{ session.discovery.provider === 'offline' ? 'DEMO FIXTURES, NOT REAL RESULTS (NO SEARCH PROVIDER SET)' : `SEARCH RESULTS VIA ${session.discovery.provider.toUpperCase()} (CANDIDATES)` }}</div>
           <div class="text-hits-list">
@@ -99,6 +107,7 @@
               </div>
               <a :href="hit.source_url" target="_blank" rel="noopener noreferrer" class="th-url mono">{{ hit.source_url }}</a>
               <p class="th-snippet">{{ hit.excerpt }}</p>
+              <p v-if="hit.ai_why" class="th-snippet mono">AI OPINION, NOT PROOF: {{ hit.ai_why }}</p>
             </div>
           </div>
         </div>
@@ -231,10 +240,17 @@ const crawlGap = computed(() => {
   if (c.images_failed) gaps.push(`${c.images_failed} image(s) could not be fetched`)
   if (c.blocked) gaps.push(`${c.blocked} page(s) were blocked`)
   if (c.robots_denied) gaps.push(`${c.robots_denied} page(s) disallowed by robots.txt`)
-  if (c.timed_out) gaps.push('the crawl hit its time limit')
+  if (c.timed_out || c.stopped === 'timeout') gaps.push('the crawl hit its time limit')
   return gaps.length ? `Not fully checked: ${gaps.join(', ')}. No match means none found in what was read, not that the image is absent.` : ''
 })
+const agentTotal = computed(() => Object.keys(session.siteAgents).length)
+const agentsRunning = computed(() => Object.values(session.siteAgents).filter((st) => st === 'spawned').length)
 const allBlocked = computed(() => session.queries.length > 0 && session.queries.every((q) => !q.allowed))
+const aiLine = computed(() => {
+  const ai = session.discovery?.ai
+  if (!ai) return ''
+  return ai.used ? `AI read ${ai.read} results in ${ai.calls} call(s), ${ai.tokens} tokens, ${ai.leads} lead(s)` : 'AI triage off: connect a provider in Step 2'
+})
 const start = () => runScout({ org: form.org.trim(), domain: form.domain.trim().toLowerCase(), entity_types: form.types, crawl: form.crawl, extra_urls: form.crawl ? form.urls.split('\n').map((u) => u.trim()).filter(Boolean) : [] })
 
 const addReference = async () => {

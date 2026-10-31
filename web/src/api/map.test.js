@@ -50,8 +50,45 @@ test('scrape edges are red kind, blocks and matches count, failures surface', ()
   assert.ok(s.graphData.edges.some((e) => e.kind === 'scrape' && e.name === 'SCRAPES'))
   applyDiscovery(s, { provider: 'serper', results: [{ match_type: 'text_search' }, { match_type: 'pdq:full', source_url: 'u' }] })
   assert.equal(s.counters.matches, 1)
+  applyDiscovery(s, { provider: 'serper', crawl: { pages: 9, images: 380 }, results: [] })
+  assert.equal(s.counters.images, 380)
   assert.equal(area('https://a.com/forum/t/1'), 'a.com/forum')
   assert.equal(area('https://a.com/x.html'), 'a.com')
+})
+
+test('ai_lead links the hub to the site without a scrape edge; ai_triage only logs', () => {
+  const s = state()
+  applyScoutEvent(s, { kind: 'ai_lead', url: 'https://a.com/forum/t/1', why: 'exposed scans' })
+  applyScoutEvent(s, { kind: 'ai_lead', url: 'https://b.com/', why: '' })
+  applyScoutEvent(s, { kind: 'ai_triage', read: 12, picked: 2, tokens: 340 })
+  assert.deepEqual(s.graphData.edges.map((e) => [e.source_node_uuid, e.target_node_uuid, e.name, e.kind]),
+    [['scout_hub', 'site_a.com/forum', 'LEAD', 'rel'], ['scout_hub', 'site_b.com', 'LEAD', 'rel']])
+  assert.equal(s.systemLogs[0].msg, '[AI lead] https://a.com/forum/t/1 (exposed scans)')
+  assert.equal(s.systemLogs[1].msg, '[AI lead] https://b.com/')
+  assert.equal(s.systemLogs[2].msg, '[AI triage] read 12, picked 2, 340 tokens')
+})
+
+test('AI-picked hits come first in their own order; the report gives AI numbers only when used', () => {
+  const s = state()
+  const results = [{ source_url: 'a', match_type: 'text_search' }, { source_url: 'b', match_type: 'text_search', ai_why: 'x' }, { source_url: 'c', match_type: 'text_search' }, { source_url: 'd', match_type: 'text_search', ai_why: 'y' }]
+  applyDiscovery(s, { provider: 'serper', results, ai: { used: true, calls: 1, tokens: 340, read: 12, leads: 2 } })
+  assert.deepEqual(s.textHits.map((r) => r.source_url), ['b', 'd', 'a', 'c'])
+  assert.deepEqual(results.map((r) => r.source_url), ['a', 'b', 'c', 'd'])
+  assert.match(buildReport(s).at(-1).content, /AI read: 12\nAI leads: 2\nAI tokens: 340/)
+  applyDiscovery(s, { provider: 'serper', results, ai: { used: false, calls: 0, tokens: 0, read: 0, leads: 0 } })
+  assert.doesNotMatch(buildReport(s).at(-1).content, /AI /)
+  applyDiscovery(s, { provider: 'serper', results })
+  assert.doesNotMatch(buildReport(s).at(-1).content, /AI /)
+})
+
+test('each site agent appears as a spawned node that owns its scrape edge', () => {
+  const s = state()
+  applyScoutEvent(s, { kind: 'site_agent', site: 'forum@h', status: 'spawned' })
+  applyScoutEvent(s, { kind: 'crawl_progress', url: 'http://h:1/forum/a.html', pages: 1, images: 0, site: 'forum@h' })
+  applyScoutEvent(s, { kind: 'site_agent', site: 'forum@h', status: 'done', pages: 1, images: 0 })
+  assert.equal(s.siteAgents['forum@h'], 'done')
+  assert.ok(s.graphData.edges.some((e) => e.source_node_uuid === 'scout_hub' && e.target_node_uuid === 'siteagent_forum@h' && e.name === 'SPAWNED'))
+  assert.ok(s.graphData.edges.some((e) => e.source_node_uuid === 'siteagent_forum@h' && e.kind === 'scrape'))
 })
 
 test('deliberation groups turns per entity; the report only states what happened', () => {

@@ -18,6 +18,7 @@ TEMPLATES = [
     'site:gist.github.com "{org}"',
     'filetype:xlsx "{org}"',
     'filetype:pdf "{org}"',
+    '"{org}"',
 ]
 
 LONG_NUMBER = re.compile(r"\d(?:[\s-]?\d){8,}")
@@ -27,33 +28,19 @@ TYPE_TERMS = {"IN_AADHAAR": "aadhaar", "IN_PAN": "pan card", "CREDIT_CARD": "car
 TIER1_HOSTS = {"pastebin.com", "rentry.co", "gist.github.com"}
 
 
-def build_queries(org: str, types: list[str], domain: str, cfg=None, blocked: list[str] = ()) -> list[str]:
-    """Template queries, plus up to 4 LLM suggestions when a provider is configured.
-    The LLM sees org/domain/known entity types only, and only if they pass firewall() first; so does every query."""
-    queries = [t.format(org=org) for t in TEMPLATES]
-    types = [t for t in types if t in TYPE_TERMS]
-    queries += [f'"{org}" {TYPE_TERMS[t]} leak' for t in types]
+def build_queries(org: str, types: list[str], domain: str, sites: list[str] = ()) -> list[str]:
+    """Search-engine queries from org, domain, known entity types and the predefined sites. Every query still passes firewall()."""
+    queries = [f'site:{s} "{org}"' for s in sites] + [t.format(org=org) for t in TEMPLATES]
+    queries += [f'"{org}" {TYPE_TERMS[t]} leak' for t in types if t in TYPE_TERMS]
     if domain:
         queries.append(f'"{domain}" leak OR dump')
-    from . import llm
-
-    cfg = cfg or llm.from_env()
-    if cfg.provider != "none" and cfg.api_key and firewall(f"{org} {domain}", list(blocked)):
-        try:
-            text = llm.complete(
-                cfg,
-                "Suggest web search queries that find public leak pages. Never include personal values. One query per line.",
-                f"org={org}\ntypes={','.join(types)}\ndomain={domain}",
-            )
-            queries.extend([line.strip() for line in text.splitlines() if line.strip()][:4])
-        except llm.LLMError:
-            pass
     return queries
 
 
 def firewall(q: str, originals: list[str]) -> bool:
+    low = q.lower()
     for original in originals:
-        if any(v in q for v in variants(original)):
+        if any(v.lower() in low for v in variants(original)):
             return False
     if LONG_NUMBER.search(q):  # an ID with a wrong checksum or a mistyped phone is still a personal value
         return False

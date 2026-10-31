@@ -39,6 +39,7 @@ const initialSession = () => ({
   discovery: null,
   scoutJobId: '',
   scoutRunning: false,
+  siteAgents: {},
   scoutError: '',
   counters: { pages: 0, images: 0, blocked: 0, matches: 0 },
 

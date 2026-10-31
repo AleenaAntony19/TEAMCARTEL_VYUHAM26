@@ -23,6 +23,7 @@ from . import llm
 from .agent_runtime import AgentResult, AutonomousAgent
 from .mcp.tools import (
     FLOOR_TYPES,
+    PIXEL_FORMATS as FILL_ONLY,
     SESSIONS,
     adversarial_penetration_test,
     execute_destructive_redaction,
@@ -33,7 +34,7 @@ from .mcp.tools import (
 )
 
 MAX_CYCLES = 3
-JSON_ONLY = " Values are masked; never guess them. Ground every claim in a tool observation or the given findings. Finish with JSON only."
+JSON_ONLY = " Values are masked; never guess them. Ground claims in tool observations or the given findings. No prose. Finish with JSON only."
 OPINIONS = ' {"opinions":[{"id":str,"stance":"redact"|"keep","reason":"max 8 words"}]}'
 DOC_ACTIONS = {"token", "mask", "remove", "keep"}
 CODE_ACTIONS = {"move_to_env", "redact_pii", "fake_pii", "yaml_safe_load", "requests_verify", "keep"}
@@ -102,24 +103,35 @@ async def run_agentic(session_id: str, cfg: llm.LLMConfig, on_event: Callable[[d
     # the safety floor redacts these in code whatever an agent says, so debating them only spends tokens
     debatable = [f for f in compact if kind != "document" or f.get("type") not in FLOOR_TYPES]
 
-    # ---- Round 1: claim / challenge / proof (parallel; the auditor only when something has a checksum)
+    # ---- Round 1: challenge and proof in parallel. Redacting is the default, so only a proposed keep needs a debate.
     personas = _personas(kind)
+    hawk = personas.pop("PrivacyHawk")
     eligible = [f for f in compact if f.get("type") in CHECKSUM_TYPES]
     if kind == "document" and not eligible:
         personas.pop("StatutoryAuditor")
     if not debatable:
-        personas.pop("PrivacyHawk")
         personas.pop("PragmaticDev")
-    r1 = await asyncio.gather(*[
-        agent(n, f"You are {n}. {brief}" + JSON_ONLY + OPINIONS, tools).execute(
-            {"findings": eligible if n == "StatutoryAuditor" and kind == "document" else debatable, "specialists": briefs}, max_steps=3)
-        for n, (brief, tools) in personas.items()])
+
+    def persona(n, brief, tools, items):
+        return agent(n, f"You are {n}. {brief}" + JSON_ONLY + OPINIONS, tools).execute({"findings": items, "specialists": briefs}, max_steps=3)
+
+    r1 = await asyncio.gather(*[persona(n, brief, tools, eligible if n == "StatutoryAuditor" and kind == "document" else debatable)
+                                for n, (brief, tools) in personas.items()])
     agents.extend(r1)
     debate = {r.name: (r.verdict or {}).get("opinions", []) for r in r1}
+    challenged = {o["id"] for o in debate.get("PragmaticDev", []) if isinstance(o, dict) and o.get("stance") == "keep" and o.get("id")}
+    if challenged:
+        answer = await persona("PrivacyHawk", *hawk, [f for f in debatable if f["id"] in challenged])
+        agents.append(answer)
+        debate[answer.name] = (answer.verdict or {}).get("opinions", [])
     emit(agent="swarm", event="round", round=1, opinions={k: len(v) for k, v in debate.items()})
 
     # ---- Round 2: optimizer + binding adjudication
-    if kind == "document":
+    fill_only = kind == "document" and s.src.suffix.lower() in FILL_ONLY  # these always get opaque boxes: nothing for an optimizer to choose
+    opt = None
+    if fill_only:
+        actions, act_desc = DOC_ACTIONS, '"remove"|"keep"'
+    elif kind == "document":
         opt = await agent("FormatGuard",
                           "You optimize document redactions for layout: call measure_layout, then pick per finding the action that "
                           "removes the value while keeping table/line widths (mask keeps length; PDFs/images always fill boxes)."
@@ -133,8 +145,9 @@ async def run_agentic(session_id: str, cfg: llm.LLMConfig, on_event: Callable[[d
                           + JSON_ONLY + ' {"proposals":[{"id":str,"action":str,"reason":str}]}',
                           []).execute({"findings": compact}, max_steps=2)
         actions, act_desc = CODE_ACTIONS, '"move_to_env"|"redact_pii"|"fake_pii"|"yaml_safe_load"|"requests_verify"|"keep"'
-    agents.append(opt)
-    debate[opt.name] = (opt.verdict or {}).get("proposals", [])
+    if opt:
+        agents.append(opt)
+        debate[opt.name] = (opt.verdict or {}).get("proposals", [])
 
     # compact stance table: {id: {"type":..., "PrivacyHawk": "redact: reason", ...}}
     table: dict[str, dict] = {f["id"]: {"type": f.get("type") or f.get("rule")} for f in debatable}
@@ -142,25 +155,26 @@ async def run_agentic(session_id: str, cfg: llm.LLMConfig, on_event: Callable[[d
         for o in items if isinstance(items, list) else []:
             if isinstance(o, dict) and o.get("id") in table:
                 table[o["id"]][who] = f"{o.get('stance') or o.get('action')}: {str(o.get('reason', ''))[:60]}"
-    adj = await agent("SwarmAdjudicator",
-                      "🧠 Synthesize the debate into ONE binding plan. Everything is redacted by default with the optimizer's action. "
-                      "List as keep ONLY findings PragmaticDev showed to be placeholders/test/non-personal; a valid checksum always means "
-                      "redact (Rule of Mathematical Superiority). List in actions ONLY overrides of the optimizer; leave it empty otherwise." + JSON_ONLY +
-                      ' {"keep":[{"finding_id":str,"reason":str}],"actions":[{"finding_id":str,"action":' + act_desc + "}]}",
-                      []).execute({"debate": table}, max_steps=2)
-    agents.append(adj)
+    adj = None
+    if challenged:  # with nothing contested the plan is already binding: redact everything
+        adj = await agent("SwarmAdjudicator",
+                          "🧠 Synthesize the debate into ONE binding plan. Everything is redacted by default with the optimizer's action. "
+                          "List as keep ONLY findings PragmaticDev showed to be placeholders/test/non-personal; a valid checksum always means "
+                          "redact (Rule of Mathematical Superiority). List in actions ONLY overrides of the optimizer; leave it empty otherwise." + JSON_ONLY +
+                          ' {"keep":[{"finding_id":str,"reason":str}],"actions":[{"finding_id":str,"action":' + act_desc + "}]}",
+                          []).execute({"debate": table}, max_steps=2)
+        agents.append(adj)
 
     # ---- binding plan (code-enforced grounding: a keep must be backed by PragmaticDev's challenge)
     known = {f["id"]: f for f in findings}
-    verdict = adj.verdict or {}
-    proposed = {o["id"]: o.get("action") for o in debate.get(opt.name, []) if isinstance(o, dict) and o.get("id") in known}
+    verdict = (adj.verdict if adj else None) or {}
+    proposed = {o["id"]: o.get("action") for o in debate.get(opt.name if opt else "", []) if isinstance(o, dict) and o.get("id") in known}
     override = {a["finding_id"]: a["action"] for a in verdict.get("actions", []) if isinstance(a, dict) and a.get("finding_id") in known and a.get("action") in actions}
-    challenged = {o["id"] for o in debate.get("PragmaticDev", []) if isinstance(o, dict) and o.get("stance") == "keep"}
     keeps, rejected = {}, []
     for k in verdict.get("keep", []):
         if isinstance(k, dict) and k.get("finding_id") in known:
             (keeps.__setitem__(k["finding_id"], str(k.get("reason", ""))[:120]) if k["finding_id"] in challenged else rejected.append(k["finding_id"]))
-    default = "token" if kind == "document" else "move_to_env"
+    default = "remove" if fill_only else "token" if kind == "document" else "move_to_env"
     decisions = []
     for fid, f in known.items():
         if fid in keeps:
@@ -173,7 +187,8 @@ async def run_agentic(session_id: str, cfg: llm.LLMConfig, on_event: Callable[[d
             act = default if kind == "document" else act
         why = "keep rejected: no PragmaticDev challenge" if fid in rejected else ("adjudicator" if fid in override else "optimizer/default")
         decisions.append({"finding_id": fid, "action": act, "reason": why})
-    missing = [] if adj.verdict else list(known)
+    dev = next((a for a in agents if a.name == "PragmaticDev"), None)
+    missing = list(known) if (adj and not adj.verdict) or (dev and not dev.verdict) else []  # nobody contested is not the same as nobody answered
     emit(agent="SwarmAdjudicator", event="binding_plan", decisions=len(decisions), fail_safe=len(missing), keeps=len(keeps), rejected_keeps=len(rejected))
 
     # ---- Execute binding plan + red team / replan
@@ -183,8 +198,6 @@ async def run_agentic(session_id: str, cfg: llm.LLMConfig, on_event: Callable[[d
             if cycle == 1 or s.cycles < cycle:
                 res = execute_destructive_redaction(session_id, [{"finding_id": d["finding_id"], "action": d["action"]} for d in decisions], strategy)
                 emit(agent="executor", event="redaction", observation=res)
-            team = agent("AdversarialRedTeamAgent", "Attack the sanitized output with adversarial_penetration_test and report leaks." + JSON_ONLY +
-                         ' {"clean":bool,"failed_attacks":[str]}', ["adversarial_penetration_test"])
         else:
             if cycle == 1:
                 for d in decisions:
@@ -192,11 +205,11 @@ async def run_agentic(session_id: str, cfg: llm.LLMConfig, on_event: Callable[[d
                         res = refactor_code_secret(session_id, d["finding_id"], d["action"])
                         emit(agent="executor", event="refactor", finding=d["finding_id"], observation=res)
                 s.cycles = 1
-            team = agent("AdversarialRedTeamAgent", "Re-scan the workspace with rescan_workspace and report what survived." + JSON_ONLY +
-                         ' {"clean":bool,"remaining":[str]}', ["rescan_workspace"])
-        agents.append(await team.execute({"cycle": cycle}, max_steps=3))
+                s.last_attack = None  # a rerun resets the cycle: an old attack result must not pass as this one
         if s.last_attack is None or s.last_attack.get("cycle") != s.cycles:
-            (adversarial_penetration_test if kind == "document" else rescan_workspace)(session_id)  # never skip verification
+            # the attack is deterministic: a model around it would only spend tokens to call one tool
+            (adversarial_penetration_test if kind == "document" else rescan_workspace)(session_id)
+        emit(agent="AdversarialRedTeamAgent", event="final", clean=s.last_attack["clean"])
         if s.last_attack["clean"] or cycle == MAX_CYCLES:
             break
         if kind == "document":

@@ -1,0 +1,21 @@
+# One instance only: jobs live in this process's memory and uploads on its local disk,
+# so a second instance would not see them, and every restart or deploy loses them.
+services:
+  - type: web
+    name: shield-scout
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter # free plans sleep when idle, and sleeping is a restart
+    numInstances: 1
+    healthCheckPath: /api/health
+    envVars:
+      - key: SHIELD_API_TOKEN # the app refuses to start without it
+        sync: false
+      - key: SERPER_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SHIELD_LLM_PROVIDER
+        value: anthropic
+      - key: FORWARDED_ALLOW_IPS # trust Render's proxy for https, so the session cookie is marked Secure
+        value: "*"

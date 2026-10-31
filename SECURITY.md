@@ -9,6 +9,8 @@
 |---|---|---|
 | LLM provider configured and "Explain" used | finding type, rule, engine, severity, confidence, layer, masked evidence | Groq or Anthropic endpoint (https only) |
 | AI deep scan (opt-in, asked every scan: `--cognitive`, or the **AI Deep Scan** command and its dialog) | **raw text** of images (OCR), documents and text notes (`.txt .md .csv .tsv .log`), never source code, with values the detectors already know blanked first. Max 30 files, 48,000 characters each | Groq or Anthropic endpoint. `SHIELD_LOCAL_ONLY=1` turns it off |
+| Discovery with an AI provider set | subject name plus masked search titles and snippets (one batched call per round, 2 rounds at most). Skipped if the subject fails the firewall | Groq or Anthropic endpoint |
+| Confirming an image match | the page hostname | rdap.org |
 | Agent swarm run (opt-in) | masked findings, masked tool observations (OCR text is masked), agent prompts | Groq or Anthropic endpoint |
 | LLM provider configured and discovery run | org, domain, entity type names | same |
 | Search provider configured | firewall-approved query strings (org/domain + generic terms) | Brave or Google Programmable Search |

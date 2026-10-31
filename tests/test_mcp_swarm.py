@@ -12,7 +12,7 @@ import pytest
 
 from shield import llm, verify
 from shield.mcp import server
-from shield.mcp.tools import SESSIONS, open_document, open_workspace, register_session
+from shield.mcp.tools import SESSIONS, list_findings, open_document, open_workspace, register_session
 from shield.models import Entity
 from shield.swarm import run_agentic
 
@@ -87,12 +87,21 @@ def test_binding_verdict_drives_redaction_with_safety_floor(tmp_path, monkeypatc
     doc.write_text("Aadhaar 2345 6789 0124\nPAN ABCPK1234F\nmail ravi.kumar@acme.in\n")
     sid = open_document(str(doc))["session_id"]
 
-    def decide(findings):  # LLM wants to keep e-mail (allowed) and PAN (floor must override)
-        return [{"finding_id": f["id"], "action": "keep" if f["type"] in {"EMAIL_ADDRESS", "IN_PAN"} else "token", "reason": "x"} for f in findings]
+    ids = {f["type"]: f["id"] for f in list_findings(sid)["findings"]}
+    real = scripted(lambda fs: [{"finding_id": f["id"], "action": "token", "reason": "x"} for f in fs])
 
-    log = []
-    res = asyncio.run(run_agentic(sid, GROQ, transport=scripted(decide, log)))
-    out = (tmp_path / "hr.txt").read_text() and open(res["output"]).read()
+    def handler(req):  # PragmaticDev and the adjudicator both want every finding kept, even PAN, which is never debated
+        body = json.loads(req.content)
+        system, last = body["messages"][0]["content"], body["messages"][-1]["role"]
+        if "You are PragmaticDev" in system and last == "tool":
+            return _reply(json.dumps({"opinions": [{"id": i, "stance": "keep", "reason": "x"} for i in ids.values()]}))
+        if "Synthesize the debate" in system:
+            return _reply(json.dumps({"keep": [{"finding_id": i, "reason": "x"} for i in ids.values()], "actions": []}))
+        return real.handle_request(req)
+
+    events = []
+    res = asyncio.run(run_agentic(sid, GROQ, events.append, httpx.MockTransport(handler)))
+    out = open(res["output"]).read()
     assert "ravi.kumar@acme.in" in out, "the binding 'keep' verdict must be honoured for non-floor findings"
     assert "ABCPK1234F" not in out and "2345 6789 0124" not in out, "floor types are always redacted"
     assert res["clean"] and res["tokens"] > 0
@@ -100,7 +109,20 @@ def test_binding_verdict_drives_redaction_with_safety_floor(tmp_path, monkeypatc
     assert all(a["steps"] > 0 for a in res["agents"])
     assert {"SovereignPIIAgent", "VisualLikenessAgent"} == {c["name"] for c in by["MetaPlanner"]["children"]}
     assert by["StatutoryAuditor"]["tools"] == ["validate_checksum"] and by["FormatGuard"]["tools"] == ["measure_layout"]
-    assert "adversarial_penetration_test" in by["AdversarialRedTeamAgent"]["tools"]
+    assert {"PrivacyHawk", "SwarmAdjudicator"} <= set(by), "a challenge starts the debate"
+    assert "AdversarialRedTeamAgent" not in by and res["attacks"], "the attack runs as a tool, without a model"
+    assert any(e.get("agent") == "AdversarialRedTeamAgent" and e.get("event") == "final" and e["clean"] for e in events)
+
+
+def test_nothing_contested_is_binding_without_hawk_or_adjudicator(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHIELD_MCP_ROOT", str(tmp_path))
+    doc = tmp_path / "a.txt"
+    doc.write_text("mail ravi.kumar@acme.in\n")
+    sid = open_document(str(doc))["session_id"]
+    res = asyncio.run(run_agentic(sid, GROQ, transport=scripted(lambda fs: [{"finding_id": f["id"], "action": "token", "reason": "x"} for f in fs])))
+    assert not {"PrivacyHawk", "SwarmAdjudicator"} & {a["name"] for a in res["agents"]}
+    assert res["fail_safe_defaults"] == 0 and res["clean"] and all(d["action"] != "keep" for d in res["decisions"])
+    assert "ravi.kumar@acme.in" not in open(res["output"]).read()
 
 
 def test_self_healing_replans_after_leak(fx, tmp_path, monkeypatch):
@@ -118,6 +140,8 @@ def test_self_healing_replans_after_leak(fx, tmp_path, monkeypatch):
     monkeypatch.setattr(verify, "attack", flaky)
     res = asyncio.run(run_agentic(sid, GROQ, transport=scripted(lambda fs: [{"finding_id": f["id"], "action": "remove", "reason": "x"} for f in fs])))
     assert res["cycles"] == 2 and res["clean"], res
+    assert "FormatGuard" not in {a["name"] for a in res["agents"]}, "PDFs always fill boxes: nothing for it to choose"
+    assert res["decisions"] and all(d["action"] == "remove" for d in res["decisions"])
     assert any(a["name"] == "MetaPlanner" and "execute_destructive_redaction" in a["tools"] for a in res["agents"][1:])
 
 
@@ -158,8 +182,44 @@ def test_llm_errors_fail_safe_never_skip_verification(tmp_path, monkeypatch):
     sid = open_document(str(doc))["session_id"]
     down = httpx.MockTransport(lambda r: httpx.Response(503))
     res = asyncio.run(run_agentic(sid, GROQ, transport=down))
-    assert res["fail_safe_defaults"] == 1 and res["clean"]  # every finding redacted, attack still ran
+    # nothing could be challenged, so the redact-everything plan is binding, not a fallback
+    assert res["fail_safe_defaults"] == 0 and res["clean"] and res["attacks"]  # every finding redacted, attack still ran
+    assert all(d["action"] != "keep" for d in res["decisions"])
     assert "ravi.kumar@acme.in" not in open(res["output"]).read()
+
+
+def test_adjudicator_failure_redacts_all_even_what_was_challenged(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHIELD_MCP_ROOT", str(tmp_path))
+    doc = tmp_path / "a.txt"
+    doc.write_text("mail ravi.kumar@acme.in\n")
+    sid = open_document(str(doc))["session_id"]
+    real = scripted(lambda fs: [{"finding_id": f["id"], "action": "keep", "reason": "x"} for f in fs])
+
+    def handler(req):
+        if "Synthesize the debate" in json.loads(req.content)["messages"][0]["content"]:
+            return httpx.Response(503)
+        return real.handle_request(req)
+
+    res = asyncio.run(run_agentic(sid, GROQ, transport=httpx.MockTransport(handler)))
+    assert res["fail_safe_defaults"] == 1 and res["clean"] and res["attacks"]
+    assert "ravi.kumar@acme.in" not in open(res["output"]).read()
+
+
+def test_malformed_opinion_still_redacts(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHIELD_MCP_ROOT", str(tmp_path))
+    doc = tmp_path / "a.txt"
+    doc.write_text("mail ravi.kumar@acme.in\n")
+    sid = open_document(str(doc))["session_id"]
+    real = scripted()
+
+    def handler(req):
+        body = json.loads(req.content)
+        if "You are PragmaticDev" in body["messages"][0]["content"] and body["messages"][-1]["role"] == "tool":
+            return _reply(json.dumps({"opinions": [{"stance": "keep"}]}))
+        return real.handle_request(req)
+
+    res = asyncio.run(run_agentic(sid, GROQ, transport=httpx.MockTransport(handler)))
+    assert res["clean"] and "ravi.kumar@acme.in" not in open(res["output"]).read()
 
 
 def test_mcp_resources_and_tool_list(tmp_path, monkeypatch):
@@ -211,20 +271,25 @@ def test_mcp_stdio_transport_end_to_end(tmp_path):
 
 
 def test_keep_without_pragmatic_challenge_is_rejected(tmp_path, monkeypatch):
-    """Adjudicator says keep, but PragmaticDev never challenged it: the keep is not grounded, so it is redacted."""
+    """PragmaticDev challenges the e-mail, the adjudicator keeps the mobile instead: that keep is not grounded, so it is redacted."""
     monkeypatch.setenv("SHIELD_MCP_ROOT", str(tmp_path))
     doc = tmp_path / "m.txt"
-    doc.write_text("Mobile +91 98765 43210\n")
+    doc.write_text("Mobile +91 98765 43210\nmail ravi.kumar@acme.in\n")
     sid = open_document(str(doc))["session_id"]
-    real_scripted = scripted(lambda fs: [{"finding_id": f["id"], "action": "token", "reason": "x"} for f in fs])
+    ids = {f["type"]: f["id"] for f in list_findings(sid)["findings"]}
+    mobile, email = ids["MOBILE_IN"], ids["EMAIL_ADDRESS"]
+    real = scripted(lambda fs: [{"finding_id": f["id"], "action": "keep" if f["id"] == email else "token", "reason": "x"} for f in fs])
 
-    def handler(req):  # adjudicator wants keep; PragmaticDev (from real_scripted) says redact
-        body = json.loads(req.content)
-        if "Synthesize the debate" in body["messages"][0]["content"] and body["messages"][-1]["role"] != "tool":
-            ids = list(json.loads(body["messages"][1]["content"])["debate"])
-            return _reply(json.dumps({"keep": [{"finding_id": i, "reason": "trust me"} for i in ids], "actions": []}))
-        return real_scripted.handle_request(req)
+    def handler(req):
+        if "Synthesize the debate" in json.loads(req.content)["messages"][0]["content"]:
+            return _reply(json.dumps({"keep": [{"finding_id": mobile, "reason": "trust me"}], "actions": []}))
+        return real.handle_request(req)
 
-    res = asyncio.run(run_agentic(sid, GROQ, transport=httpx.MockTransport(handler)))
-    assert all(d["action"] != "keep" and "keep rejected" in d["reason"] for d in res["decisions"])
-    assert "98765 43210" not in open(res["output"]).read()
+    events = []
+    res = asyncio.run(run_agentic(sid, GROQ, events.append, httpx.MockTransport(handler)))
+    assert "SwarmAdjudicator" in {a["name"] for a in res["agents"]}, "the adjudicator must have run for this to prove anything"
+    decision = {d["finding_id"]: d for d in res["decisions"]}
+    assert decision[mobile]["action"] != "keep" and "keep rejected" in decision[mobile]["reason"]
+    assert next(e for e in events if e.get("event") == "binding_plan")["rejected_keeps"] == 1
+    out = open(res["output"]).read()
+    assert "98765 43210" not in out and "ravi.kumar@acme.in" not in out

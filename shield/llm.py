@@ -36,6 +36,13 @@ SYSTEM = (
 )
 
 
+
+
+def _no_thinking(model: str) -> dict:
+    """Short JSON tasks: thinking spends tokens and can use up max_tokens first. Larger models reject the setting, so Haiku only."""
+    return {"thinking": {"type": "disabled"}} if "haiku" in model else {}
+
+
 class LLMError(RuntimeError):
     pass
 
@@ -117,13 +124,13 @@ def _request(cfg: LLMConfig, system: str, user: str, max_tokens: int, json_mode:
         return ({"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"}, body)
     return (
         {"x-api-key": cfg.api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-        {"model": cfg.model, "max_tokens": max_tokens, "system": system, "messages": [{"role": "user", "content": user}]},
+        {"model": cfg.model, "max_tokens": max_tokens, "system": system, "messages": [{"role": "user", "content": user}], **_no_thinking(cfg.model)},
     )
 
 
 def _text(cfg: LLMConfig, data: dict) -> str:
     if cfg.provider == "groq":
-        return data["choices"][0]["message"]["content"].strip()
+        return (data["choices"][0]["message"]["content"] or "").strip()
     return "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text").strip()
 
 
@@ -204,15 +211,25 @@ def _post(cfg: LLMConfig, headers: dict, body: dict, transport: httpx.BaseTransp
     raise LLMError(f"{cfg.provider} request failed: {last}".replace(cfg.api_key, "***")[:300])
 
 
+def complete_counted(
+    cfg: LLMConfig, system: str, user: str, transport: httpx.BaseTransport | None = None,
+    max_tokens: int = 600, json_mode: bool = False,
+) -> tuple[str, int]:
+    """The reply and the tokens it cost."""
+    headers, body = _request(cfg, system, user, max_tokens, json_mode)
+    try:
+        data = _post(cfg, headers, body, transport)
+        usage = data.get("usage") or {}
+        return _text(cfg, data), int(usage.get("total_tokens") or usage.get("input_tokens", 0) + usage.get("output_tokens", 0))
+    except (KeyError, IndexError, TypeError):
+        raise LLMError("unexpected response shape") from None
+
+
 def complete(
     cfg: LLMConfig, system: str, user: str, transport: httpx.BaseTransport | None = None,
     max_tokens: int = 600, json_mode: bool = False,
 ) -> str:
-    headers, body = _request(cfg, system, user, max_tokens, json_mode)
-    try:
-        return _text(cfg, _post(cfg, headers, body, transport))
-    except (KeyError, IndexError, TypeError):
-        raise LLMError("unexpected response shape") from None
+    return complete_counted(cfg, system, user, transport, max_tokens, json_mode)[0]
 
 
 def chat_tools(
@@ -268,7 +285,7 @@ def chat_tools(
                     msgs[-1]["content"].append(block)  # consecutive results share one user turn
                 else:
                     msgs.append({"role": "user", "content": [block]})
-        body = {"model": cfg.model, "max_tokens": max_tokens, "system": system, "messages": msgs,
+        body = {"model": cfg.model, "max_tokens": max_tokens, "system": system, "messages": msgs, **_no_thinking(cfg.model),
                 "tools": [{"name": t["name"], "description": t["description"], "input_schema": t["input_schema"]} for t in tools]}
         data = _post(cfg, {"x-api-key": cfg.api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}, body, transport)
         blocks = data.get("content", [])

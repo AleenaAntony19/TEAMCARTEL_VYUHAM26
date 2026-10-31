@@ -162,13 +162,15 @@ def test_swarm_run_binding_events_and_download(client, monkeypatch):
     assert "event: end" in body and '"status": "done"' in body
     assert AADHAAR not in body and "ABCPK1234F" not in body
     events = [json.loads(line[5:]) for line in body.splitlines() if line.startswith("data:")]
-    assert any(e.get("event") == "spawn" for e in events) and any(e.get("action") == "adversarial_penetration_test" for e in events)
+    assert any(e.get("event") == "spawn" for e in events)
+    assert any(e.get("agent") == "AdversarialRedTeamAgent" and e.get("event") == "final" and e["clean"] for e in events)
     job = client.get(f"/api/v1/shield/jobs/{jid}").json()
     assert job["agent_run"]["status"] == "done" and job["redaction"]["status"] == "CLEAN" and job["state"] == "consensus_ledger"
     out = client.get(f"/api/jobs/{jid}/download").text
     assert "Ravi Kumar" in out and "ABCPK1234F" not in out  # binding keep honoured; floor enforced
     actions = [b["actor"] for b in server.JOBS[jid].ledger.blocks]
-    assert "agent_tool:execute_destructive_redaction" in actions and server.JOBS[jid].ledger.verify() is None
+    assert {"agent_tool:execute_destructive_redaction", "agent_tool:adversarial_penetration_test"} <= set(actions)
+    assert server.JOBS[jid].ledger.verify() is None
 
 
 def test_mcp_streamable_http_lists_tools(client):
@@ -325,17 +327,41 @@ def test_llm_errors_never_carry_the_key(monkeypatch):
     assert "SECRETKEY123" not in str(e.value) and "401" in str(e.value)
 
 
-@pytest.mark.parametrize("org,sent", [("2345 6789 0124", False), ("9876543210", False), ("abcpk1234f", False), ("123456789012", False), ("Acme Corp", True)])
-def test_personal_values_never_reach_the_llm_prompt(monkeypatch, org, sent):
-    from shield import llm, textscout
+@pytest.mark.parametrize("org,sent", [("2345 6789 0124", False), ("9876543210", False), ("abcpk1234f", False), ("123456789012", False), ("Infosys Limited", True)])
+def test_personal_values_never_reach_the_llm_prompt(client, monkeypatch, org, sent):
+    from shield import llm, scout_agent, textscout
 
-    calls = []
-    monkeypatch.setattr(llm, "complete", lambda *a, **k: calls.append(a) or "")
-    cfg = llm.LLMConfig(provider="groq", model="m", api_key="k")
-    qs = textscout.build_queries(org, ["IN_PAN", "not_a_type'; drop"], "", cfg)
-    assert bool(calls) == sent and not any("drop" in q for q in qs)
+    qs = textscout.build_queries(org, ["IN_PAN", "not_a_type'; drop"], "")
+    assert qs and not any("drop" in q for q in qs)
     assert all(textscout.firewall(q, []) == sent for q in qs)
-    assert not textscout.build_queries("Acme Corp", [], "", cfg, ["Acme"]) or len(calls) == sent
+    assert not any(textscout.firewall(q, ["Acme"]) for q in textscout.build_queries("Acme Corp", [], ""))
+
+    prompts, searched = [], []
+
+    def complete_counted(cfg, system, user, *a, **k):
+        prompts.append(user)
+        return json.dumps({"relevant": [], "next": [f'"Acme Corp" {org}']}), 10
+
+    class Provider(textscout.SearchProvider):
+        name = "serper"
+
+        def search(self, q):
+            searched.append(q)
+            return [textscout._hit(f"https://x.example/{len(searched)}", f"{org} staff", "list", "serper")]
+
+    monkeypatch.setattr(llm, "complete_counted", complete_counted)
+    monkeypatch.setattr(textscout, "get_provider", lambda *a: Provider())
+    cfg = llm.LLMConfig(provider="groq", model="m", api_key="k")
+    monkeypatch.setattr(server, "LLM_CFG", cfg)
+
+    # a follow-up the model asks for passes the same firewall as a built query
+    next_q = scout_agent.triage(cfg, "Acme Corp", [{"source_url": "https://x.example/", "title": "Acme Corp staff", "excerpt": "e"}], [])["next"]
+    assert bool(next_q) == sent
+    prompts.clear()
+
+    jid = client.post("/api/v1/scout/search", json={"org": org, "entity_types": ["IN_PAN"]}).json()["job_id"]
+    d = wait(client, jid)["discovery"]
+    assert bool(searched) == sent and bool(prompts) == sent and bool(d["ai"]["calls"]) == sent
 
 
 def test_token_login_sets_cookie_that_unlocks_the_api(client, monkeypatch):

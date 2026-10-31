@@ -37,11 +37,12 @@ function stopAll() {
 
 export const refreshConfig = () => api.config().then((c) => { config.value = c }, (e) => log(`API unreachable: ${e.message}`, 'warn'))
 
-export async function createCase(file) {
+/** The server takes exactly one source, so a file wins over pasted text. */
+export async function createCase(file, text) {
   stopAll()
   resetSession()
-  const { id } = await api.submitFile(file)
-  if (file.type.startsWith('image/')) session.originalUrl = URL.createObjectURL(file)
+  const { id } = await (file ? api.submitFile(file) : api.submitText(text))
+  if (file?.type.startsWith('image/')) session.originalUrl = URL.createObjectURL(file)
   return id
 }
 
@@ -56,8 +57,10 @@ export function watchJob(id) {
     try {
       job = await api.job(id)
     } catch (e) {
-      return fail(e, 'Case not available')
+      if (session.jobId === id) fail(e, 'Case not available')
+      return
     }
+    if (session.jobId !== id) return // the case changed while this poll was in flight
     applyJob(session, job)
     if (job.status === 'queued' || job.status === 'running') {
       pollTimer = setTimeout(tick, POLL_MS)
@@ -136,7 +139,7 @@ function followSwarm() {
 export async function runScout({ org, domain, entity_types, crawl, extra_urls }) {
   const requestedCrawl = crawl
   if (session.scoutRunning) return
-  Object.assign(session, { queries: [], textHits: [], matches: [], discovery: null, scoutError: '', counters: { pages: 0, images: 0, blocked: 0, matches: 0 } })
+  Object.assign(session, { siteAgents: {}, queries: [], textHits: [], matches: [], discovery: null, scoutError: '', counters: { pages: 0, images: 0, blocked: 0, matches: 0 } })
   session.scoutRunning = true
   setStatus('Scouting', 'processing')
   const finish = () => { session.scoutRunning = false; setStatus('Ready', 'completed') }
@@ -154,7 +157,13 @@ export async function runScout({ org, domain, entity_types, crawl, extra_urls })
     end: async (_, close) => {
       close()
       finish()
-      const job = await api.job(id)
+      let job
+      try {
+        job = await api.job(id)
+      } catch (e) {
+        session.scoutError = `Scout finished but its results could not be loaded: ${e.message}`
+        return
+      }
       if (job.discovery) applyDiscovery(session, job.discovery)
       const crawl = job.stages.find((st) => st.name === 'crawl')
       if (job.status === 'failed') session.scoutError = job.error || 'scout failed'

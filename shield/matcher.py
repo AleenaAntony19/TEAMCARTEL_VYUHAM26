@@ -46,7 +46,9 @@ class Matcher:
         if res.blocked_reason or not res.body:
             self.failed += 1  # counted, so "no match" can never hide "could not check"
             return None
+        return await asyncio.to_thread(self._match, ref, res)  # hashing must not stall the other site agents
 
+    def _match(self, ref, res) -> Match | None:
         data = res.body
         arr = np.frombuffer(data, np.uint8)
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -76,6 +78,7 @@ class Matcher:
             if sha in self._shas:
                 del data, arr, img, vecs, regions
                 return None
+            self._shas.add(sha)  # before any other thread reaches the check above
             kind = "face" if sim is not None and (d is None or sim >= face.THRESHOLD) else "pdq"
             m = Match(
                 id=sha[:16],
@@ -94,7 +97,6 @@ class Matcher:
                 last_modified=res.headers.get("last-modified"),
             )
             self.matches.append(m)
-            self._shas.add(sha)
             del data, arr, img, vecs, regions
             return m
 

@@ -31,7 +31,9 @@ Development UI with hot reload: `cd web && npm run dev` (http://localhost:5173, 
 
 Run every check: `bash scripts/validate.sh`.
 
-The crawl registry ([registry/seeds.yaml](registry/seeds.yaml)) ships with the local demo sites only. To try image matching, run `python demo/serve.py` and start the API with `SHIELD_ALLOW_LOCAL=1`; for real use, replace the seeds with sites you may crawl.
+**Scope:** text search covers the open web through the search provider. Image matching runs on predefined sites, pages you add and AI leads, because hashing every image online needs far more compute than one server has. One code agent per site runs in parallel with no AI tokens. PDQ hashes are compact, so the matcher can scale out with more compute, but that scale has not been load tested.
+
+Add your predefined sites to [registry/seeds.yaml](registry/seeds.yaml) (or point `SHIELD_REGISTRY` at your own file). A row with `follow: 0` scans only its listed pages. The registry ships with the local demo sites only. To try image matching, run `python demo/serve.py` and start the API with `SHIELD_ALLOW_LOCAL=1`; for real use, replace the seeds with sites you may crawl.
 
 ## How it works
 
@@ -89,6 +91,39 @@ What is sent: finding type, rule, severity, confidence, layer and **masked** evi
 **AI deep scan is the one exception.** `python -m shield.codescan scan --cognitive` (or **Shield: AI Deep Scan** in VS Code, which asks every time) sends image OCR, document text and text notes (`.txt .md .csv .tsv .log`) to the provider, to find sensitive data no rule covers. Values the detectors already know are blanked first. Answers only add findings (`AI_SENSITIVE`): each must quote the text, stays an opinion at 60% confidence, and is cached masked in `.shield/cache/cognitive.json`, so unchanged files are not sent again. Source code is not sent.
 
 > ⚠️ Any API key that was ever pasted into a chat, ticket or commit is compromised: revoke and rotate it at the provider before using this tool. No key is stored in this repo; `.githooks/pre-commit` blocks commits that contain one.
+
+## Deploy (MVP)
+
+One Docker container: the [Dockerfile](Dockerfile) builds the web UI, installs the engine and fetches the hash-pinned face models. Always start it with `python -m shield.api` (the image default): that entry point refuses a non-loopback bind when `SHIELD_API_TOKEN` is empty or `SHIELD_ALLOW_LOCAL=1`. Running `uvicorn` directly skips this check.
+
+| Variable | Needed | Purpose |
+|---|---|---|
+| `SHIELD_API_TOKEN` | yes | Protects `/api` and `/mcp`. Generate it with `openssl rand -hex 32`. |
+| `ANTHROPIC_API_KEY` | optional | AI features (`SHIELD_LLM_PROVIDER=anthropic`) |
+| `SERPER_API_KEY` | optional | Live discovery search |
+| `PORT` | set by the host | Listen port, 8000 if unset. `SHIELD_PORT` wins if both are set. |
+
+Render, using [render.yaml](render.yaml):
+
+1. Push this repo to GitHub.
+2. In Render choose **New > Blueprint** and select the repo.
+3. Enter the secrets when asked, then deploy.
+4. Open the service URL and enter the token when the web app asks for it.
+
+Any other Docker host:
+
+```bash
+docker build -t shield-scout .
+docker run --rm -p 8080:8080 -e PORT=8080 -e SHIELD_API_TOKEN="$(openssl rand -hex 32)" shield-scout
+```
+
+Limits:
+
+- Single instance only. Jobs live in memory and uploads on local disk, so a restart or deploy loses them.
+- One shared token and no accounts: everyone holding it can reach every job, so share it only with people you trust.
+- The registry ships demo sites only, and `SHIELD_ALLOW_LOCAL` is refused on a public bind, so crawling finds nothing until you replace [registry/seeds.yaml](registry/seeds.yaml) with sites you may crawl and rebuild.
+- No browser in the image: gallery crawls read static HTML only and evidence screenshots are unavailable.
+- `/api/health`, `/docs`, `/openapi.json` and the web app's static files need no token. Uploads and results do.
 
 ## Privacy & safety
 

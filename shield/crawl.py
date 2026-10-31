@@ -29,6 +29,7 @@ class Job:
     tier: int = 2
     seq: int = 0
     retries: int = 0
+    site: str = ""  # the site agent that owns this job
 
 
 def classify(soup: BeautifulSoup, seed_category: str = "") -> str:
@@ -75,7 +76,10 @@ class Scheduler:
         self.max_depth = max_depth
         self.sem = asyncio.Semaphore(global_concurrency)
         self.budget_pages = budget_pages
-        self.q: asyncio.PriorityQueue = asyncio.PriorityQueue()
+        self.sites: dict[str, asyncio.PriorityQueue] = {}
+        self.site_stats: dict[str, dict] = {}
+        self._agents: dict[str, asyncio.Task] = {}
+        self._ctx: tuple | None = None
         self.pending = 0
         self.seq = 0
         self.blocked: set[str] = set()
@@ -92,7 +96,14 @@ class Scheduler:
         job.seq = self.seq
         self.seq += 1
         self.pending += 1
-        self.q.put_nowait((tier, -risk, job.seq, job))
+        job.site = job.site or job.domain or urlparse(job.url).netloc
+        self.sites.setdefault(job.site, asyncio.PriorityQueue()).put_nowait((tier, -risk, job.seq, job))
+        self._spawn(job.site)
+
+    def _spawn(self, site: str) -> None:
+        """One agent per site, so a slow or rate-limited site never holds up the others."""
+        if self._ctx and (site not in self._agents or self._agents[site].done()):
+            self._agents[site] = asyncio.create_task(self._site_agent(site))
 
     async def _pace(self, domain: str, gap: float | None = None):
         lock = self._locks.setdefault(domain, asyncio.Lock())
@@ -106,7 +117,8 @@ class Scheduler:
 
     async def _process(self, job: Job, fetcher, on_image, on_event):
         domain = job.domain or (urlparse(job.url).netloc.split(":")[0])
-        if domain in self.blocked:
+        stats = self.site_stats.setdefault(job.site, {"pages": 0, "images": 0})
+        if job.site in self.blocked:
             self.pending -= 1
             if self.pending <= 0:
                 self._done.set()
@@ -114,8 +126,10 @@ class Scheduler:
 
         if job.kind == "image":
             self.counters["images"] += 1
+            stats["images"] += 1
             await self._pace(urlparse(job.url).netloc, self.image_gap)
-            await on_image(ImageRef(job.page_url or job.url, job.url, domain))
+            async with self.sem:
+                    await on_image(ImageRef(job.page_url or job.url, job.url, domain))
             self.pending -= 1
             if self.pending <= 0:
                 self._done.set()
@@ -129,6 +143,8 @@ class Scheduler:
             await asyncio.sleep(RETRY_WAIT)
             self.push(job.tier, job.risk, replace(job, retries=job.retries + 1))
             self.pending -= 1
+            if self.pending <= 0:  # at the page budget the push is refused, and nothing else would end the run
+                self._done.set()
             return
         if res.blocked_reason:
             if res.blocked_reason == "robots":
@@ -136,7 +152,7 @@ class Scheduler:
                 await on_event({"kind": "robots_denied", "url": job.url})
             else:
                 self.counters["blocked"] += 1
-                self.blocked.add(domain)
+                self.blocked.add(job.site)  # the site, not the host: one refused section must not stop the rest of a host
                 await on_event({"kind": "blocked", "url": job.url, "reason": res.blocked_reason})
             self.pending -= 1
             if self.pending <= 0:
@@ -144,7 +160,8 @@ class Scheduler:
             return
 
         self.counters["pages"] += 1
-        await on_event({"kind": "crawl_progress", **self.counters, "url": job.url})
+        stats["pages"] += 1
+        await on_event({"kind": "crawl_progress", **self.counters, "url": job.url, "site": job.site})
 
         soup = BeautifulSoup(res.body, "html.parser")
         kind = classify(soup, job.seed_category)
@@ -166,25 +183,23 @@ class Scheduler:
                     next_urls.append(href)
 
         for ref in sorted(refs):
-            self.push(job.tier, job.risk, Job(ref, "image", job.depth, domain, job.url, job.seed_category))
+            self.push(job.tier, job.risk, Job(ref, "image", job.depth, domain, job.url, job.seed_category, site=job.site))
 
         if job.depth < self.max_depth:
             for nxt in next_urls:
                 if urlparse(nxt).netloc == urlparse(job.url).netloc:
-                    self.push(job.tier, job.risk, Job(nxt, "page", job.depth + 1, domain, job.url, job.seed_category))
+                    self.push(job.tier, job.risk, Job(nxt, "page", job.depth + 1, domain, job.url, job.seed_category, site=job.site))
 
         self.pending -= 1
         if self.pending <= 0:
             self._done.set()
 
-    async def _worker(self, fetcher, on_image, on_event):
-        while True:
-            try:
-                _, _, _, job = await asyncio.wait_for(self.q.get(), timeout=5.0)
-            except asyncio.TimeoutError:
-                if self.pending <= 0:
-                    return
-                continue
+    async def _site_agent(self, site: str):
+        fetcher, on_image, on_event = self._ctx
+        await on_event({"kind": "site_agent", "site": site, "status": "spawned"})
+        q = self.sites[site]
+        while not q.empty():
+            job = q.get_nowait()[-1]
             try:
                 await self._process(job, fetcher, on_image, on_event)
             except asyncio.CancelledError:
@@ -194,19 +209,23 @@ class Scheduler:
                 self.pending -= 1
                 if self.pending <= 0:
                     self._done.set()
+        await on_event({"kind": "site_agent", "site": site, "status": "done", **self.site_stats.get(site, {})})
 
     async def run(self, fetcher, on_image, on_event, timeout: float = 120) -> dict:
         if self.pending == 0:
             return dict(self.counters)
-        workers = [asyncio.create_task(self._worker(fetcher, on_image, on_event)) for _ in range(8)]
+        self._ctx = (fetcher, on_image, on_event)
+        for site in list(self.sites):
+            self._spawn(site)
         try:
             await asyncio.wait_for(self._done.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             self.counters["timed_out"] = True  # the report must say the crawl stopped early
         finally:
-            for w in workers:
-                w.cancel()
-            await asyncio.gather(*workers, return_exceptions=True)
+            agents = list(self._agents.values())
+            for a in agents:
+                a.cancel()
+            await asyncio.gather(*agents, return_exceptions=True)
         return dict(self.counters)
 
 
