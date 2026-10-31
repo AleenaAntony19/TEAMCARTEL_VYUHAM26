@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 from .models import ImageRef
 
 
+MIN_IMAGE_WIDTH = 64  # the matcher ignores anything smaller
 RETRYABLE = {"http_403", "http_429"}
 RETRY_WAIT = 5.0
 IMAGE_RPS = 3.0  # images were unpaced: real sites answer a burst with 403, and the match is then silently lost
@@ -55,6 +56,8 @@ def _abs(base: str, href: str) -> str:
 def _image_urls(soup: BeautifulSoup, base: str) -> set[str]:
     out: set[str] = set()
     for tag in soup.select("img"):
+        if str(tag.get("width", "")).isdigit() and int(tag["width"]) < MIN_IMAGE_WIDTH:
+            continue  # icons and flags: never a match, and each one costs a rate-limited fetch
         for attr in ("src", "data-src", "srcset"):
             value = tag.get(attr)
             if not value:
@@ -79,6 +82,7 @@ class Scheduler:
         self.sites: dict[str, asyncio.PriorityQueue] = {}
         self.site_stats: dict[str, dict] = {}
         self._agents: dict[str, asyncio.Task] = {}
+        self._images_paced: set[str] = set()
         self._ctx: tuple | None = None
         self.pending = 0
         self.seq = 0
@@ -127,7 +131,9 @@ class Scheduler:
         if job.kind == "image":
             self.counters["images"] += 1
             stats["images"] += 1
-            await self._pace(urlparse(job.url).netloc, self.image_gap)
+            if job.url not in self._images_paced:  # a repeat is answered from memory: no request, so no wait
+                self._images_paced.add(job.url)
+                await self._pace(urlparse(job.url).netloc, self.image_gap)
             async with self.sem:
                     await on_image(ImageRef(job.page_url or job.url, job.url, domain))
             self.pending -= 1

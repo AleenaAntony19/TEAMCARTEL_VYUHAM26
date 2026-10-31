@@ -356,3 +356,47 @@ def test_links_to_pdfs_are_collected_and_a_url_that_is_a_pdf_goes_to_the_matcher
 
     counters = asyncio.run(go())
     assert seen == ["https://w.org/a.pdf"] and counters["pages"] == 0 and counters["images"] == 1
+
+
+def test_the_same_image_on_two_pages_is_fetched_once_and_reported_for_both():
+    import asyncio
+
+    import cv2
+    import numpy as np
+
+    from shield import pdq
+    from shield.matcher import Matcher
+    from shield.models import ImageRef
+
+    rng = np.random.default_rng(3)
+    img = cv2.resize(rng.integers(0, 255, (40, 40, 3), dtype=np.uint8), (400, 400), interpolation=cv2.INTER_CUBIC)
+    bank = pdq.HashBank()
+    bank.add_reference("r", "r", cv2.cvtColor(img, cv2.COLOR_BGR2RGB), [])
+    png = cv2.imencode(".png", img)[1].tobytes()
+    calls = []
+
+    class Res:
+        blocked_reason, headers, body = None, {}, png
+
+    class F:
+        async def get(self, url):
+            calls.append(url)
+            return Res()
+
+    async def go():
+        m, f = Matcher([], bank), F()
+        got = await asyncio.gather(*[m.on_image(ImageRef(p, "https://cdn/i.png", "x"), f) for p in ("https://a/1", "https://b/2", "https://a/1")])
+        return m, got
+
+    m, got = asyncio.run(go())
+    assert len(calls) == 1 and sorted(x.page_url for x in got if x) == ["https://a/1", "https://b/2"]
+    assert len({x.id for x in got if x}) == 2 and len(m.matches) == 2
+
+
+def test_small_images_are_not_collected():
+    from bs4 import BeautifulSoup
+
+    from shield.crawl import _image_urls
+
+    html = '<img src="/flag.png" width="20"><img src="/photo.jpg" width="300"><img src="/plain.jpg">'
+    assert _image_urls(BeautifulSoup(html, "html.parser"), "https://w.org/") == {"https://w.org/photo.jpg", "https://w.org/plain.jpg"}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import cv2
@@ -45,14 +46,29 @@ class Matcher:
         self.bank = bank
         self.matches: list[Match] = []
         self.failed = 0
-        self._urls: set[str] = set()
-        self._shas: set[str] = set()
+        self._seen: dict[str, asyncio.Future] = {}  # image URL -> its verdict, shared by every page showing it
+        self._shas: set[tuple[str, str]] = set()
 
     async def on_image(self, ref, fetcher) -> Match | None:
-        if ref.image_url in self._urls:
-            return None
-        self._urls.add(ref.image_url)  # the same image on many pages is fetched once
+        known = self._seen.get(ref.image_url)
+        if known is not None:  # same image on another page: no new fetch, but that page must still be reported
+            first = await known
+            if first is None or (first.sha256, ref.page_url) in self._shas:
+                return None
+            self._shas.add((first.sha256, ref.page_url))
+            again = replace(first, page_url=ref.page_url, id=hashlib.sha256(f"{first.id}{ref.page_url}".encode()).hexdigest()[:16])
+            self.matches.append(again)
+            return again
+        self._seen[ref.image_url] = done = asyncio.get_running_loop().create_future()
+        try:
+            found = await self._check(ref, fetcher)
+        except BaseException:
+            done.set_result(None)
+            raise
+        done.set_result(found)
+        return found
 
+    async def _check(self, ref, fetcher) -> Match | None:
         res = await fetcher.get(ref.image_url)
         if res.blocked_reason in {"http_403", "http_429"}:
             await asyncio.sleep(3)  # usually a rate limit: one patient retry
@@ -94,13 +110,13 @@ class Matcher:
         v = pdq.verdict(d, sim, face.THRESHOLD)
         if v:
             sha = hashlib.sha256(data).hexdigest()
-            if sha in self._shas:
+            if (sha, page_url) in self._shas:
                 del data, arr, img, vecs, regions
                 return None
-            self._shas.add(sha)  # before any other thread reaches the check above
+            self._shas.add((sha, page_url))  # before any other thread reaches the check above
             kind = "face" if sim is not None and (d is None or sim >= face.THRESHOLD) else "pdq"
             m = Match(
-                id=sha[:16],
+                id=hashlib.sha256(f"{sha}{page_url}".encode()).hexdigest()[:16],
                 page_url=page_url,
                 image_url=image_url,
                 kind=kind,
