@@ -507,6 +507,16 @@ def auth(body: AuthRequest, request: Request):
     return resp
 
 
+def _host_facts() -> dict:
+    """What a host's dashboard would show: which commit runs, peak memory, and the plan's limit."""
+    import resource
+
+    limit = Path("/sys/fs/cgroup/memory.max")
+    raw = limit.read_text().strip() if limit.exists() else ""
+    return {"commit": os.getenv("RENDER_GIT_COMMIT", "")[:7], "peak_rss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024,
+            "memory_limit_mb": int(raw) // 1048576 if raw.isdigit() else None}
+
+
 @app.get("/api/health")
 def health():
     import shutil as sh
@@ -514,8 +524,7 @@ def health():
     return {
         "ok": True,
         "tools": {"tesseract": bool(sh.which("tesseract")), "pdftotext": bool(sh.which("pdftotext"))},
-        "face_models": YUNET.exists() and SFACE.exists(),
-    }
+        "face_models": YUNET.exists() and SFACE.exists(), **_host_facts()}
 
 
 @app.get("/api/config")
